@@ -1,0 +1,60 @@
+.TH "o2image" "8" "April 2009" "Version @VERSION@" "OCFS2 Manual Pages"
+.SH "NAME"
+o2image \- Copy or restore \fIOCFS2\fR file system meta-data
+.SH "SYNOPSIS"
+\fBo2image\fR [\fB\-r\fR] [\fB\-I\fR] \fIdevice\fR \fIimage-file\fR
+.SH "DESCRIPTION"
+.PP
+\fBo2image\fR copies the \fIOCFS2\fR file system meta-data from the device to the specified image-file.
+This image file contains the file system skeleton that includes the inodes, directory names
+and file names. It does \fBnot\fR include any file data.
+
+This image file can be useful to debug certain problems that are not reproducible otherwise.
+Like on-disk corruptions. It could also be used to analyse the file system layout in an aging
+file system with an eye towards improving performance.
+
+As the image-file contains a copy of all the meta-data blocks, it can be a large file.
+By default, it is created in a packed format, in which all meta-data blocks are written
+back-to-back. With the \fB\-r\fR option, the user could choose to have the file in the
+raw (or sparse) format, in which the blocks are written to the same offset as they are
+on the device.
+
+\fIdebugfs.ocfs2\fR understands both formats.
+
+\fBo2image\fR also has the option, \fI\-I\fR, to restore the meta-data from the image
+file onto the device. This option will rarely be useful to end-users and has been written
+specifically for developers and testers.
+
+.SH "OPTIONS"
+.TP
+\fB\-r\fR
+Copies the meta-data to the image-file in the raw format. Use this option only if
+the destination file system supports sparse files. If unsure, do not use this option
+and let the tool create the image-file in the packed format.
+
+.TP
+\fB\-I\fR
+Restores meta-data from the image-file onto the device. \fBCAUTION: This option could
+corrupt the file system.\fR
+
+.SH "EXAMPLES"
+
+.TS
+;
+L.
+[root@node1 ~]# o2image /dev/sda1 sda1.out
+Copies metadata blocks from /dev/sda1 device to sda1.out file
+
+[root@node1 ~] o2image -I /dev/sda1 sda1.out
+\fBUse with CAUTION\fR. Copies meta-data blocks from sda1.out onto the /dev/sda1 device.
+.TE
+
+.SH "SEE ALSO"
+.BR debugfs.ocfs2(8)
+.BR fsck.ocfs2(8)
+
+.SH "AUTHORS"
+Oracle Corporation
+
+.SH "COPYRIGHT"
+Copyright \(co 2007, 2009 Oracle. All rights reserved.

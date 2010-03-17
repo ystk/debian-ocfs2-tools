@@ -1,0 +1,419 @@
+AC_PREREQ(2.54)
+
+AC_INIT(libocfs2/bitmap.c)
+
+PACKAGE=ocfs2-tools
+
+AC_SUBST(PACKAGE)
+
+# Adjust these for the software version.
+MAJOR_VERSION=1
+MINOR_VERSION=4
+MICRO_VERSION=4
+EXTRA_VERSION=
+
+DIST_VERSION=$MAJOR_VERSION.$MINOR_VERSION.$MICRO_VERSION
+if test -z "$EXTRA_VERSION"; then
+    VERSION=$DIST_VERSION
+else
+    VERSION=$DIST_VERSION-$EXTRA_VERSION
+fi
+
+AC_SUBST(MAJOR_VERSION)
+AC_SUBST(MINOR_VERSION)
+AC_SUBST(MICRO_VERSION)
+AC_SUBST(EXTRA_VERSION)
+
+AC_SUBST(DIST_VERSION)
+AC_SUBST(VERSION)
+
+AC_CANONICAL_HOST
+
+case "$host" in
+  *-*-linux*)
+    ;;
+  *)
+    AC_MSG_ERROR([This filesystem will only work on Linux])
+    ;;
+esac
+
+#
+# If CFLAGS is non-empty, leave the debugging and optimization symobls
+# to the caller.  Otherwise, set them according to --enable-debug.
+#
+OCFS2_DEBUG=
+AC_MSG_CHECKING(for debugging)
+if test "x$CFLAGS" = "x"; then
+  AC_ARG_ENABLE(debug, [  --enable-debug=[yes/no]         Turn on debugging [default=no]],,enable_debug=no)
+  if test "x$enable_debug" = "xyes"; then
+    OCFS2_DEBUG=yes
+    CFLAGS="-g"
+  else
+    CFLAGS="-O2"
+  fi
+  AC_MSG_RESULT($enable_debug)
+else
+  AC_MSG_RESULT([skipped, CFLAGS is set])
+fi
+AC_SUBST(OCFS2_DEBUG)
+
+AC_PROG_CC
+AC_PROG_CPP
+
+#
+# If OCFS2_DEBUG was set, we know CFLAGS must be "-g".  If we're using
+# GNU C, get extra debugging symbols.
+#
+if test "x$GCC" = "xyes" -a "x$OCFS2_DEBUG" = "xyes"; then
+  CFLAGS="-ggdb"
+fi
+
+AC_PROG_INSTALL
+AC_PROG_LN_S
+AC_PROG_RANLIB
+
+AC_PATH_PROG(AR, ar)
+
+AC_HEADER_STDC
+AC_C_CONST
+
+MB_VENDOR(VENDOR)
+
+if test "x$GCC" != "xyes"; then
+  AC_MSG_ERROR(GCC is required)
+fi
+
+AC_ARG_WITH([root-prefix], [  --with-root-prefix=PREFIX override prefix variable for files to be placed in the root], root_prefix=$withval, root_prefix="")
+
+root_bindir='${root_prefix}/bin'
+root_sbindir='${root_prefix}/sbin'
+root_sysconfdir='${root_prefix}/etc'
+
+AC_SUBST(root_prefix)
+AC_SUBST(root_bindir)
+AC_SUBST(root_sbindir)
+AC_SUBST(root_sysconfdir)
+
+COM_ERR_LIBS=
+PKG_CHECK_MODULES(COM_ERR, com_err,, [
+  AC_CHECK_LIB(com_err, com_err, COM_ERR_LIBS=-lcom_err)
+  if test "x$COM_ERR_LIBS" = "x"; then
+    AC_MSG_ERROR([Unable to find com_err library])
+  fi
+  AC_CHECK_HEADER(et/com_err.h, :,
+    AC_MSG_ERROR([Unable to find com_err headers]))
+  AC_SUBST(COM_ERR_LIBS)
+])
+
+UUID_LIBS=
+AC_CHECK_LIB(uuid, uuid_unparse, UUID_LIBS=-luuid)
+if test "x$UUID_LIBS" = "x"; then
+  AC_MSG_ERROR([Unable to find uuid library])
+fi
+AC_CHECK_HEADER(uuid/uuid.h, :,
+  AC_MSG_ERROR([Unable to find uuid headers]))
+AC_SUBST(UUID_LIBS)
+
+NCURSES_LIBS=
+AC_CHECK_LIB(ncurses, tgetstr, NCURSES_LIBS=-lncurses)
+if test "x$NCURSES_LIBS" = "x"; then
+  AC_MSG_ERROR([Unable to find ncurses library])
+fi
+AC_SUBST(NCURSES_LIBS)
+
+saved_LDFLAGS="$LDFLAGS"
+LDFLAGS="$LDFLAGS -lncurses"
+READLINE_LIBS=
+AC_CHECK_LIB(readline, readline, READLINE_LIBS=-lreadline)
+if test "x$READLINE_LIBS" = "x"; then
+  AC_MSG_ERROR([Unable to find readline library])
+fi
+AC_CHECK_HEADER(readline/readline.h, :,
+  AC_MSG_ERROR([Unable to find readline headers]))
+AC_SUBST(READLINE_LIBS)
+LDFLAGS="$saved_LDFLAGS"
+
+AC_MSG_CHECKING(for debug executables)
+AC_ARG_ENABLE(debugexe, [  --enable-debugexe=[yes/no]     Enable debug executables for library source files [default=no]],,enable_debugexe=no)
+OCFS2_DEBUG_EXE=
+if test "x$enable_debugexe" = "xyes"; then
+    OCFS2_DEBUG_EXE=yes
+fi
+AC_SUBST(OCFS2_DEBUG_EXE)
+AC_MSG_RESULT($enable_debugexe)
+
+GLIB_REQUIRED_VERSION=2.2.3
+
+AM_PATH_GLIB_2_0($GLIB_REQUIRED_VERSION, have_glib=yes,
+ AC_MSG_ERROR([GLib $GLIB_REQUIRED_VERSION or better is required]))
+
+AC_MSG_CHECKING(whether to build fsck dynamically)
+AC_ARG_ENABLE([dynamic-fsck], [  --enable-dynamic-fsck=[yes/no]    Build fsck dynamically [default=no]],,enable_dynamic_fsck=no)
+OCFS2_DYNAMIC_FSCK=
+if test "x$enable_dynamic_fsck" = "xyes"; then
+    OCFS2_DYNAMIC_FSCK=yes
+fi
+AC_SUBST(OCFS2_DYNAMIC_FSCK)
+AC_MSG_RESULT($enable_dynamic_fsck)
+
+OCFS2_DYNAMIC_CTL=
+AC_MSG_CHECKING(whether to build cluster control tools dynamically)
+AC_ARG_ENABLE([dynamic-ctl], [  --enable-dynamic-ctl=[yes/no]    Build cluster control tools dynamically [default=test]], [
+AC_MSG_RESULT($enable_dynamic_ctl)
+], [
+enable_dynamic_ctl=test
+AC_MSG_RESULT(test)])
+
+if test "x$enable_dynamic_ctl" = "xtest"; then
+  dyn_save_CFLAGS="$CFLAGS"
+  dyn_save_LIBS="$LIBS"
+  CFLAGS="$CFLAGS $GLIB_CFLAGS"
+  LIBS="-static $LIBS $GLIB_LIBS"
+
+  AC_MSG_CHECKING(how to link o2cb_ctl)
+  AC_TRY_LINK([
+#include <glib.h>
+#include <stdio.h>
+], [ return ((glib_major_version) || (glib_minor_version) || (glib_micro_version)); ], [
+enable_dynamic_ctl=no
+AC_MSG_RESULT(static)
+], [
+enable_dynamic_ctl=yes
+AC_MSG_RESULT(dynamic)])
+
+  CFLAGS="$dyn_save_CFLAGS"
+  LIBS="$dyn_save_LIBS"
+fi
+
+if test "x$enable_dynamic_ctl" = "xyes"; then
+    OCFS2_DYNAMIC_CTL=yes
+fi
+AC_SUBST(OCFS2_DYNAMIC_CTL)
+
+BUILD_DEBUGOCFS2=
+
+ocfs_tools_save_LIBS="$LIBS"
+LIBS="$LIBS -lncurses"
+AC_CHECK_LIB(readline, readline,
+  [AC_CHECK_HEADER(readline/readline.h,
+    BUILD_DEBUGOCFS2=yes,
+    [AC_MSG_WARN([readline not found, debugfs.ocfs2 will not be built])])],
+  [AC_MSG_WARN([readline not found, debugfs.ocfs2 will not be built])])
+LIBS="$ocfs_tools_save_LIBS"
+
+AC_SUBST(BUILD_DEBUGOCFS2)
+
+pcmk_found=
+AC_CHECK_LIB(crmcluster, crm_get_peer,
+  [AC_CHECK_HEADER(pacemaker/crm_config.h, pcmk_found=yes,
+    [AC_MSG_WARN([Pacemaker headers not found, pacemaker support will not be built])])],
+  [AC_MSG_WARN([libcrmcluster not found, pacemaker support will not be built])])
+
+# We use cman_replyto_shutdown to insure a new enough libcman
+cman_found=
+AC_CHECK_LIB(cman, cman_replyto_shutdown,
+  [AC_CHECK_HEADER(libcman.h, cman_found=yes,
+    [AC_MSG_WARN([libcman.h not found, cman support will not be built])])],
+  [AC_MSG_WARN([libcman not found, cman support will not be built])])
+
+cpg_found=
+HAVE_COROSYNC=
+AC_CHECK_HEADER(corosync/cpg.h, [
+  cpg_found=yes
+  HAVE_COROSYNC=yes ],
+  [AC_CHECK_HEADER(openais/cpg.h, cpg_found=yes,
+    [AC_MSG_WARN([openais/cpg.h not found, ocfs2_controld will not be built])])])
+AC_SUBST(HAVE_COROSYNC)
+
+#
+# We can't use AC_CHECK_LIB on corosync or openais libraries, because they
+# are in ${libdir}/corosync or ${libdir}/openais, and we can't expand it in
+# configure.in.  What we'll try instead is to search AIS_TRY_PATH for
+# -L<element>/<package> -l<lib>.
+# NOTE that the initial colon ':' is *intentional*.  We want the empty
+# string first in case the user passed LDFLAGS.
+#
+AIS_TRY_PATH=":/usr/lib64:/usr/lib:/usr/local/lib64:/usr/local/lib"
+
+CPG_LDFLAGS=
+if test "x$cpg_found" = "xyes"; then
+    cpg_found=
+    if test "x$HAVE_COROSYNC" = "xyes"; then
+        cpg_package=corosync
+    else
+        cpg_package=openais
+    fi
+    TRY_PATH="$AIS_TRY_PATH"
+    AC_MSG_CHECKING([for cpg_initialize in -lcpg])
+    while test "x$TRY_PATH" != "x"; do
+        TRY="`echo $TRY_PATH | cut -f1 -d:`"
+        TRY_PATH="`echo $TRY_PATH | cut -f2- -d:`"
+
+        if test "x$TRY" != "x"; then
+            TRY="-L${TRY}/${cpg_package}"
+        fi
+        # TRY="$TRY"
+
+        saved_LDFLAGS="$LDFLAGS"
+        LDFLAGS="$LDFLAGS $TRY -lcpg"
+        AC_LINK_IFELSE([AC_LANG_CALL([], [cpg_initialize])],
+        	       cpg_found=yes)
+        LDFLAGS="$saved_LDFLAGS"
+
+        if test "x$cpg_found" = "xyes"; then
+            CPG_LDFLAGS="$TRY"
+            break
+        fi
+    done
+fi
+if test "x$cpg_found" = "xyes"; then
+    AC_MSG_RESULT(yes)
+else
+    AC_MSG_RESULT(no)
+    AC_MSG_WARN([libcpg not found, ocfs2_controld will not be built])
+fi
+AC_SUBST(CPG_LDFLAGS)
+
+ckpt_found=
+AC_CHECK_HEADER(openais/saCkpt.h, ckpt_found=yes,
+  [AC_MSG_WARN([openais/saCkpt.h not found, ocfs2_controld will not be built])],
+  [#include <openais/saAis.h>])
+
+AIS_LDFLAGS=
+if test "x$ckpt_found" = "xyes"; then
+    ckpt_found=
+    TRY_PATH="$AIS_TRY_PATH"
+    AC_MSG_CHECKING([for saCkptInitialize in -lSaCkpt])
+    while test "x$TRY_PATH" != "x"; do
+        TRY="`echo $TRY_PATH | cut -f1 -d:`"
+        TRY_PATH="`echo $TRY_PATH | cut -f2- -d:`"
+
+        if test "x$TRY" != "x"; then
+            TRY="-L${TRY}/openais"
+        fi
+        # TRY="$TRY"
+
+        saved_LDFLAGS="$LDFLAGS"
+        LDFLAGS="$LDFLAGS $TRY -lSaCkpt"
+        AC_LINK_IFELSE([AC_LANG_CALL([], [saCkptInitialize])],
+        	       ckpt_found=yes)
+        LDFLAGS="$saved_LDFLAGS"
+
+        if test "x$ckpt_found" = "xyes"; then
+            AIS_LDFLAGS="$TRY"
+            break
+        fi
+    done
+fi
+if test "x$ckpt_found" = "xyes"; then
+    AC_MSG_RESULT(yes)
+else
+    AC_MSG_RESULT(no)
+    AC_MSG_WARN([libSaCkpt not found, ocfs2_controld will not be built])
+fi
+AC_SUBST(AIS_LDFLAGS)
+
+libdlmcontrol_found=
+AC_CHECK_LIB(dlmcontrol, dlmc_fs_connect,
+  [AC_CHECK_HEADER(libdlmcontrol.h, libdlmcontrol_found=yes,
+    [AC_MSG_WARN([libdlmcontrol.h not found, ocfs2_controld will not be built])],
+    [
+#include <sys/stat.h>
+#include <inttypes.h>
+#include <libdlm.h>
+])],
+  [AC_MSG_WARN([libdlmcontrol not found, ocfs2_controld will not be built])])
+
+LIBDLM_FOUND=
+AC_CHECK_HEADER(libdlm.h, LIBDLM_FOUND=yes,
+  [AC_MSG_WARN([libdlm.h not found, fsdlm support will not be built])])
+AC_SUBST(LIBDLM_FOUND)
+
+fsdlm_found=
+if test "x$LIBDLM_FOUND" = "xyes"; then
+  AC_CHECK_LIB(dlm_lt, dlm_create_lockspace, fsdlm_found=yes)
+  if test "xfsdlm_found" = "xyes"; then
+    AC_MSG_WARN([libdlm_lt not found, fsdlm support will not be built])
+  fi
+fi
+
+BUILD_FSDLM_SUPPORT=
+DL_LIBS=
+if test "x$fsdlm_found" = "xyes"; then
+  BUILD_FSDLM_SUPPORT=yes
+  DL_LIBS=-ldl
+fi
+AC_SUBST(BUILD_FSDLM_SUPPORT)
+AC_SUBST(DL_LIBS)
+
+BUILD_OCFS2_CONTROLD=
+if test "x$cpg_found" = "xyes" -a "x$ckpt_found" = "xyes" -a "x$libdlmcontrol_found" = "xyes"; then
+  if test "x$fsdlm_found" = "xyes"; then
+    BUILD_OCFS2_CONTROLD=yes
+  else
+    AC_MSG_WARN([fsdlm support is not available, ocfs2_controld will not be built])
+  fi
+fi
+AC_SUBST(BUILD_OCFS2_CONTROLD)
+
+BUILD_PCMK_SUPPORT=
+if test "x$pcmk_found" = "xyes" -a "x$BUILD_OCFS2_CONTROLD" = "xyes"; then
+  BUILD_PCMK_SUPPORT=yes
+fi
+AC_SUBST(BUILD_PCMK_SUPPORT)
+
+BUILD_CMAN_SUPPORT=
+if test "x$cman_found" = "xyes" -a "x$BUILD_OCFS2_CONTROLD" = "xyes"; then
+  BUILD_CMAN_SUPPORT=yes
+fi
+AC_SUBST(BUILD_CMAN_SUPPORT)
+
+BUILD_OCFS2CONSOLE=
+AC_ARG_ENABLE(ocfs2console, [  --enable-ocfs2console=[yes/no]    Build GUI frontend [default=yes]],,enable_ocfs2console=yes)
+
+if test "x$enable_ocfs2console" = "xyes"; then
+  dnl check for Python
+  AM_PATH_PYTHON(2.3, have_python=yes, have_python=no)
+
+  if test "x$have_python" = "xyes"; then
+    AM_CHECK_PYTHON_HEADERS(have_pythondev=yes, have_pythondev=no)
+
+    if test "x$have_pythondev" = "xyes"; then
+      if $PYTHON -c 'import gobject' >/dev/null 2>&1; then
+        BUILD_OCFS2CONSOLE=yes
+        OCFS2_BLKID
+      else
+        AC_MSG_WARN([could not find PyGTK, ocfs2console will not be built])
+      fi 
+    else
+      AC_MSG_WARN([could not find Python headers, ocfs2console will not be built])
+    fi
+  else
+    AC_MSG_WARN([could not find Python 2.3 or higher, ocfs2console will not be built])
+  fi
+fi
+
+AC_SUBST(BUILD_OCFS2CONSOLE)
+
+AC_CONFIG_FILES([
+Config.make
+o2cb.pc
+o2dlm.pc
+ocfs2.pc
+ocfs2console/ocfs2interface/confdefs.py
+debugfs.ocfs2/debugfs.ocfs2.8
+mkfs.ocfs2/mkfs.ocfs2.8
+mounted.ocfs2/mounted.ocfs2.8
+fsck.ocfs2/fsck.ocfs2.8
+fsck.ocfs2/fsck.ocfs2.checks.8
+mount.ocfs2/mount.ocfs2.8
+o2cb_ctl/o2cb_ctl.8
+ocfs2_hb_ctl/ocfs2_hb_ctl.8
+ocfs2console/ocfs2console.8
+tunefs.ocfs2/tunefs.ocfs2.8
+o2image/o2image.8
+libo2cb/o2cb.7
+vendor/common/ocfs2-tools.spec-generic
+])
+
+AC_OUTPUT

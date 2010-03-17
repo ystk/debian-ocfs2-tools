@@ -1,0 +1,109 @@
+.TH "fsck.ocfs2" "8" "April 2009" "Version @VERSION@" "OCFS2 Manual Pages"
+.SH "NAME"
+fsck.ocfs2 \- Check an \fIOCFS2\fR file system.
+.SH "SYNOPSIS"
+\fBfsck.ocfs2\fR [ \fB\-fFGnuvVy\fR ] [ \fB\-b\fR \fIsuperblock block\fR ] [ \fB\-B\fR \fIblock size\fR ] \fIdevice\fR
+.SH "DESCRIPTION"
+.PP 
+\fBfsck.ocfs2\fR is used to check an OCFS2 file system.
+
+\fIdevice\fR is the file where the file system is stored (e.g. \fI/dev/sda1\fR).
+It will almost always be a device file but a regular file will work as well.
+
+.SH "OPTIONS"
+.TP
+\fB\-b\fR \fIsuperblock block\fR
+Normally, \fBfsck.ocfs2\fR will read the superblock from the first block of
+the device.  This option specifies an alternate block that the superblock
+should be read from. (Use \fB\-r\fR instead of this option.)
+
+.TP
+\fB\-B\fR \fIblocksize\fR
+The \fIblock size\fR, specified in bytes, can range from 512 to 4096.
+A value of 0, the default, is used to indicate that the blocksize should be automatically detected.
+
+.TP
+\fB\-f\fR
+Force checking even if the file system is clean. 
+
+.TP
+\fB\-F\fR
+By default \fBfsck.ocfs2\fR will check with the cluster services to ensure that
+the volume is not in-use (mounted) on any node in the cluster before proceeding.
+\fB-F\fR skips this check and should only be used when it can be guaranteed that
+the volume is not mounted on any node in the cluster. \fBWARNING: If the cluster
+check is disabled and the volume is mounted on one or more nodes, file system
+corruption is very likely. If unsure, do not use this option.\fR
+
+.TP
+\fB\-G\fR
+Usually \fBfsck.ocfs2\fR will silently assume inodes whose generation number
+does not match the generation number of the super block are unused inodes.
+This option causes \fBfsck.ocfs2\fR to ask the user if these inodes should in
+fact be marked unused.
+
+.TP
+\fB\-n\fR
+Give the 'no' answer to all questions that fsck will ask.  This guarantees
+that the file system will not be modified and the device will be opened
+read-only.  The output of \fBfsck.ocfs2\fR with this option can be redirected
+to produce a record of a file system's faults.
+
+.TP
+\fB\-r\fR \fIbackup-number\fR
+\fImkfs.ocfs2\fR makes upto 6 backup copies of the superblock at offsets
+1G, 4G, 16G, 64G, 256G and 1T depending on the size of the volume.
+Use this option to specify the backup, 1 thru 6, to use to recover the
+superblock.
+
+.TP
+\fB\-y\fR 
+Give the 'yes' answer to all questions that fsck will ask.  This will repair
+all faults that \fBfsck.ocfs2\fR finds but will not give the operator a chance to intervene if \fBfsck.ocfs2\fR decides that it wants to drastically repair the file system.
+
+.TP
+\fB\-v\fR 
+This option causes \fBfsck.ocfs2\fR to produce a very large amount of debugging output.
+
+.TP
+\fB\-V\fR 
+Print version information and exit.
+
+.SH EXIT CODE
+The exit code returned by \fBfsck.ocfs2\fR is the sum of the following conditions:
+.br
+\	0\	\-\ No errors
+.br
+\	1\	\-\ File system errors corrected
+.br
+\	2\	\-\ File system errors corrected, system should
+.br
+\	\	\ \ be rebooted
+.br
+\	4\	\-\ File system errors left uncorrected
+.br
+\	8\	\-\ Operational error
+.br
+\	16\	\-\ Usage or syntax error
+.br
+\	32\	\-\ fsck.ocfs2 canceled by user request
+.br
+\	128\	\-\ Shared library error
+.br
+
+.SH "SEE ALSO"
+.BR mkfs.ocfs2(8)
+.BR debugfs.ocfs2(8)
+.BR tunefs.ocfs2(8)
+.BR mounted.ocfs2(8)
+.BR ocfs2console(8)
+.BR o2cb(7)
+
+
+.SH "AUTHORS"
+Oracle Corporation.  This man page entry derives some text, especially the exit code summary, from
+.BR e2fsck(8)
+by Theodore Y. Ts'o <tytso@mit.edu>.
+
+.SH "COPYRIGHT"
+Copyright \(co 2004, 2009 Oracle. All rights reserved.

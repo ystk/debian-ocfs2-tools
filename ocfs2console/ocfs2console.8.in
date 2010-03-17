@@ -1,0 +1,25 @@
+.TH "ocfs2console" "8" "April 2009" "Version @VERSION@" "OCFS2 Manual Pages"
+.SH "NAME"
+ocfs2console - GUI console for \fIOCFS2\fR.
+.SH "SYNOPSIS"
+.B ocfs2console
+
+.SH DESCRIPTION
+.PP
+\fBocfs2console\fP is a GUI front\-end for managing \fIOCFS2\fR volumes.
+This tool is especially recommended to configure the \fIO2CB\fR cluster.
+One can also use this tool to format, tune, mount and umount \fIOCFS2\fR volumes.
+
+.SH SEE ALSO
+.BR mkfs.ocfs2(8)
+.BR fsck.ocfs2(8)
+.BR tunefs.ocfs2(8)
+.BR mounted.ocfs2(8)
+.BR debugfs.ocfs2(8)
+.BR o2cb(7)
+
+.SH AUTHORS
+Oracle Corporation
+
+.SH COPYRIGHT
+Copyright \(co 2004, 2009 Oracle. All rights reserved.

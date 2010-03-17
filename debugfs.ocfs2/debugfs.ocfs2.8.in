@@ -1,0 +1,258 @@
+.TH "debugfs.ocfs2" "8" "April 2009" "Version @VERSION@" "OCFS2 Manual Pages"
+.SH "NAME"
+debugfs.ocfs2 \- OCFS2 file system debugger.
+.SH "SYNOPSIS"
+\fBdebugfs.ocfs2\fR [\fB\-f\fR \fIcmdfile\fR] [\fB\-R\fR \fIcommand\fR] [\fB\-s\fR \fIbackup\fR] [\fB\-nwV?\fR] [\fIdevice\fR]
+.TP
+\fBdebugfs.ocfs2\fR \fB\-l\fR [\fItracebit\fR ... [\fBallow\fR|\fBoff\fR|\fBdeny\fR]] ...
+.TP
+\fBdebugfs.ocfs2\fR \fB\-d, \-\-decode\fR \fIlockname\fR
+.TP
+\fBdebugfs.ocfs2\fR \fB\-e, \-\-encode\fB \fIlock_type block_num [generation | parent]\fR
+
+.SH "DESCRIPTION"
+.PP 
+The \fBdebugfs.ocfs2\fR program is an interactive file system debugger useful
+in displaying on-disk \fBOCFS2\fR filesystem structures on the specified \fIdevice\fR.
+
+.SH "OPTIONS"
+
+.TP
+\fB\-d, \-\-decode\fR \fIlockname\fR
+Display the information encoded in the \fIlockname\fR.
+
+.TP
+\fB\-e, \-\-encode\fR \fIlock_type block_num [generation | parent]\fR
+Display the lockname obtained by encoding the arguments provided.
+
+.TP
+\fB\-f, \-\-file\fR \fIcmdfile\fR
+Executes the debugfs commands in \fIcmdfile\fR.
+
+.TP
+\fB\-i, \-\-image\fR
+Specifies device is an o2image file created by \fIo2image\fR tool.
+
+.TP
+\fB\-l\fR [\fItracebit\fR ... [\fBallow\fR|\fBoff\fR|\fBdeny\fR]] ...
+Control \fBOCFS2\fR filesystem tracing by enabling and disabling trace bits.
+Do \fIdebugfs.ocfs2 -l\fR to get the list of all trace bits.
+
+.TP
+\fB\-n, \-\-noprompt\fR
+Hide prompt.
+
+.TP
+\fB\-R, \-\-request\fR \fIcommand\fR
+Executes a single debugfs command.
+
+.TP
+\fB\-s, \-\-superblock\fR \fIbackup\-number\fR
+\fImkfs.ocfs2\fR makes upto 6 backup copies of the superblock at offsets 1G, 4G,
+16G, 64G, 256G and 1T depending on the size of the volume. Use this option to
+specify the backup, 1 thru 6, to use to open the volume.
+
+.TP
+\fB\-w, \-\-write\fR
+Opens the filesystem in \fIRW\fR mode. By default the filesystem is opened
+in \fIRO\fR mode.
+
+.TP
+\fB\-V, \-\-version\fR 
+Display version and exit.
+
+.TP
+\fB\-?, \-\-help\fR 
+Displays help and exit.
+
+.SH "SPECIFYING FILES"
+Many \fBdebugfs.ocfs2\fR commands take a \fIfilespec\fR as an argument
+to specify an inode (as opposed to a pathname) in the filesystem which
+is currently opened by \fBdebugfs.ocfs2\fR. The \fIfilespec\fR argument
+may be specified in two forms. The first form is an inode number or lockname
+surrounded by angle brackets, e.g., <32>. The second form is a pathname;
+if the pathname is prefixed by a forward slash ('/'), then it is
+interpreted relative to the root of the filesystem which is currently
+opened by \fBdebugfs.ocfs2\fR. If not, the path is interpreted relative
+to the current working directory as maintained by \fBdebugfs.ocfs2\fR,
+which can be modified using the command \fIcd\fR. If the pathname is
+prefixed by a double forward slash ('//'), then it is interpreted relative
+to the root of the system directory of the filesystem opened by
+\fBdebugfs.ocfs2\fR.
+
+.SH "LOCKNAMES"
+Locknames are specially formatted strings used by the file system
+to uniquely identify objects in the filesystem. Most locknames used
+by \fIOCFS2\fR are generated using the inode number and its generation
+number and can be decoded using the \fIdecode\fR command or used directly
+in place of an inode number in commands requiring a \fIfilespec\fR. Like
+inode numbers, locknames need to be enclosed in angle brackets, e.g.,
+<M000000000000000040c40c044069cf>. To generate a lockname for a given object,
+use the \fIencode\fR command.
+
+.SH "COMMANDS"
+This is a list of the commands which debugfs.ocfs2 supports.
+
+.TP
+\fIbmap filespec logical_block\fR
+Display the physical block number corresponding to the logical block
+number \fIlogical_block\fR in the inode \fIfilespec\fR.
+
+.TP
+\fIcat filespec\fR
+Dump the contents of inode \fIfilespec\fR to stdout.
+
+.TP
+\fIcd filespec\fR
+Change the current working directory to \fIfilespec\fR.
+
+.TP
+\fIchroot filespec\fR
+Change the root directory to be the directory \fIfilespec\fR.
+
+.TP
+\fIclose\fR
+Close the currently opened filesystem.
+
+.TP
+\fIcontrold dump\fR
+Display information obtained from ocfs2_controld.
+
+.TP
+\fIcurdev\fR
+Show the currently open device.
+
+.TP
+\fIdecode <lockname>\fR
+Display the inode number encoded in the \fIlockname\fR.
+
+.TP
+\fIdirblocks <filespec>\fR
+Display the directory blocks associated with the given \fIfilespec\fR.
+
+.TP
+\fIdlm_locks [\-f <file>] [\-l] [<lockname(s)>]...\fR
+Display the status of all lock resources in the \fIo2dlm\fR domain that the file
+system is a member of. This command expects the debugfs filesystem to be mounted
+as \fImount -t debugfs debugfs /sys/kernel/debug\fR. Use \fIlockname(s)\fR to
+limit the output to the given lock resources, \fI-l\fR to include contents of
+the lock value block and \fI-f <file>\fR to specify a saved copy of
+/sys/kernel/debug/o2dlm/<DOMAIN>/locking_state.
+
+.TP
+\fIdump [\-p] filespec outfile\fR
+Dump the contents of the inode \fIfilespec\fR to the output file
+\fIoutfile\fR. If the \fI-p\fR is given, set the owner, group,
+timestamps and permissions information on \fIoutfile\fR to match
+those of \fIfilespec\fR.
+
+.TP
+\fIencode filespec\fR
+Display the lockname for the \fIfilespec\fR.
+
+.TP
+\fIextent block#\fR
+Display the contents of the extent structure at \fIblock#\fR.
+
+.TP
+\fIfindpath [<lockname>|<inode#>]\fR
+Display the pathname for the inode specified by \fIlockname\fR or \fIinode#\fR. This
+command does not display all the hard-linked paths for the inode.
+
+.TP
+\fIfs_locks [-f <file>] [-l] [-B] [<lockname(s)>]...\fR
+Display the status of all locks known by the file system. This command expects
+the debugfs filesystem to be mounted as \fImount -t debugfs debugfs /sys/kernel/debug\fR.
+Use \fIlockname(s)\fR to limit the output to the given lock resources,
+\fI-B\fR to limit the output to only the busy locks, \fI-l\fR to include
+contents of the lock value block and \fI-f <file>\fR to specify a
+saved copy of /sys/kernel/debug/ocfs2/<UUID>/locking_state.
+
+.TP
+\fIgroup block#\fR
+Display the contents of the group descriptor at \fIblock#\fR.
+
+.TP
+\fIhb\fR
+Display the contents of the heartbeat system file.
+
+.TP
+\fIhelp, ?\fR
+Print the list of commands understood by \fBdebugfs.ocfs2\fR.
+
+.TP
+\fIicheck block# ...\fR
+Display the inodes that use the one or more blocks specified on the command line.
+If the inode is a regular file, also display the corresponding logical block offset.
+
+.TP
+\fIlcd directory\fR
+Change the current working directory of the \fBdebugfs.ocfs2\fR process
+to the \fIdirectory\fR on the native filesystem.
+
+.TP
+\fIlocate [<lockname>|<inode#>] ...\fR
+Display all pathnames for the inode(s) specified by \fIlockname\fRs or \fIinode#\fRs.
+
+.TP
+\fIlogdump node#\fR
+Display the contents of the journal for node \fInode#\fR.
+
+.TP
+\fIls [\-l] filespec\fR
+Print the listing  of the files in the directory \fIfilespec\fR. The
+\fI\-l\fR flag will list files in the long format.
+
+.TP
+\fIncheck [<lockname>|<inode#>] ...\fR
+See \fIlocate\fR.
+
+.TP
+\fIopen device\fR
+Open the filesystem on \fIdevice\fR.
+
+.TP
+\fIquit, q\fR
+Quit \fBdebugfs.ocfs2\fR.
+
+.TP
+\fIrdump [\-v] filespec outdir\fR
+Recursively dump directory \fIfilespec\fR and all its contents
+(including regular files, symbolic links and other directories) into
+the \fIoutdir\fR which should be an existing directory on the native
+filesystem.
+
+.TP
+\fIslotmap\fR
+Display the contents of the \fIslotmap\fR system file.
+
+.TP
+\fIstat filespec\fR
+Display the contents of the inode structure for the \fIfilespec\fR.
+
+.TP
+\fIstats [\-h] [\-s backup\-number]\fR
+Display the contents of the superblock. Use \fI\-s\fR to display a
+specific backup superblock. Use \fI\-h\fR to hide the inode.
+
+.TP
+\fIxattr [-v] <filespec>\fR
+Display extended attributes associated with the given \fIfilespec\fR.
+
+.SH "ACKNOWLEDGEMENT"
+This tool has been modelled after \fBdebugfs\fR, a debugging tool for ext2.
+
+.SH "SEE ALSO"
+.BR mkfs.ocfs2(8)
+.BR fsck.ocfs2(8)
+.BR tunefs.ocfs2(8)
+.BR mounted.ocfs2(8)
+.BR ocfs2console(8)
+.BR o2image(8)
+.BR o2cb(7)
+
+.SH "AUTHOR"
+Oracle Corporation
+
+.SH "COPYRIGHT"
+Copyright \(co 2004, 2009 Oracle. All rights reserved.

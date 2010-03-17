@@ -1,0 +1,108 @@
+.TH "mount.ocfs2" "8" "April 2009" "Version 1.4.4" "OCFS2 Manual Pages"
+.SH "NAME"
+mount.ocfs2 \-  mount an \fIOCFS2\fR filesystem
+.SH "SYNOPSIS"
+\fBmount.ocfs2\fR [\fI\-vn\fR] [\fB\-o options\fR] \fIdevice\fR \fIdir\fR
+.SH "DESCRIPTION"
+.PP 
+\fBmount.ocfs2\fR mounts an \fIOCFS2\fR filesystem at \fIdir\fR. It is usually
+invoked indirectly by the mount(8) command when using the \fI-t ocfs2\fR option.
+
+.SH "OPTIONS"
+
+.TP
+\fB\_netdev\fR
+The filesystem resides on a device that requires network access (used to prevent
+the system from attempting to mount these filesystems until the network has
+been enabled on the system). \fImount.ocfs2\fR transparently appends this option
+during mount. However, users mounting the volume via /etc/fstab must explicitly
+specify this mount option to delay the system from mounting the volume until
+after the network has been enabled.
+
+.TP
+\fBatime\_quantum=nrsec\fR
+The file system will not update atime unless this number of seconds has passed
+since the last update. Set to zero to always update atime. It defaults to 60 secs.
+
+.TP
+\fBrelatime\fR
+The file system only update atime if the previous atime is older than mtime or ctime.
+
+.TP
+\fBnoatime\fR
+The file system will not update access time.
+
+.TP
+\fBacl\fR
+Enables POSIX ACLs(Access Control Lists) support.
+
+.TP
+\fBuser_xattr / nouser_xattr\fR
+Enables / disable Extended User Attributes.
+
+.TP
+\fBcommit=nrsec\fR
+Sync all data and metadata every nrsec seconds. The default value is 5 seconds.
+Zero means default.
+
+.TP
+\fBdata=ordered / data=writeback\fR
+Specifies the handling of file data during metadata journalling.
+.RS 1.2i
+.TP
+\fBordered\fR
+This is the default mode. All data is forced directly out to the main file
+system prior to its metadata being committed to the journal.
+.RE
+.RS 1.2i
+.TP
+\fBwriteback\fR
+Data  ordering is not preserved - data may be written into the main file system
+after its metadata has been committed to the journal. This is rumored to be
+the highest-throughput option. While it guarantees internal file system
+integrity, it can allow old data to appear in files after a crash and journal
+recovery.
+.RE
+
+.TP
+\fBdatavolume\fR
+Use this mount option to mount volumes storing the Oracle data files,
+control files, redo logs, archive logs, voting disk, cluster registry, etc.
+(This mount option is only available with \fIOCFS2 1.2\fR and \fIOCFS2 1.4\fR.)
+
+.TP
+\fBerrors=remount-ro / errors=panic\fR
+Define the behavior when an error is encountered. (Either remount the file
+system read-only, or panic and halt the system.) By default, the file system
+is remounted read only.
+
+.TP
+\fBlocalflocks\fR
+This disables cluster-aware flock(2).
+
+.TP
+\fBintr / nointr\fR
+The default is intr that allows signals to interrupt cluster operations.
+nointr disables signals during cluster operations.
+
+.TP
+\fBro\fR
+Mount the file system read-only.
+
+.TP
+\fBrw\fR
+Mount the file system read-write.
+
+.SH "SEE ALSO"
+.BR mkfs.ocfs2(8)
+.BR fsck.ocfs2(8)
+.BR tunefs.ocfs2(8)
+.BR mounted.ocfs2(8)
+.BR debugfs.ocfs2(8)
+.BR o2cb(7)
+
+.SH "AUTHORS"
+Oracle Corporation
+
+.SH "COPYRIGHT"
+Copyright \(co 2004, 2009 Oracle. All rights reserved.
