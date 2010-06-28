@@ -1,0 +1,25 @@
+diff -urN ocfs2-tools-1.4.3.orig/mkfs.ocfs2/mkfs.ocfs2.8.in ocfs2-tools-1.4.3/mkfs.ocfs2/mkfs.ocfs2.8.in
+--- ocfs2-tools-1.4.3.orig/mkfs.ocfs2/mkfs.ocfs2.8.in	2009-07-24 00:22:28.000000000 +0200
++++ ocfs2-tools-1.4.3/mkfs.ocfs2/mkfs.ocfs2.8.in	2009-11-05 08:53:35.000000000 +0100
+@@ -219,7 +219,7 @@
+ .TS
+ ;
+ L.
+-[root@node1 ~]# tunefs.ocfs2 -Q "Label: %V\\nFeatures: %H %O\\n" /dev/sdg1
++[root@node ~]# tunefs.ocfs2 -Q "Label: %V\\nFeatures: %H %O\\n" /dev/sdg1
+ Label: apache_files_10
+ Features: sparse inline-data unwritten
+ .TE
+diff -urN ocfs2-tools-1.4.3.orig/o2image/o2image.8.in ocfs2-tools-1.4.3/o2image/o2image.8.in
+--- ocfs2-tools-1.4.3.orig/o2image/o2image.8.in	2009-05-09 00:13:13.000000000 +0200
++++ ocfs2-tools-1.4.3/o2image/o2image.8.in	2009-11-05 08:29:59.000000000 +0100
+@@ -46,7 +46,8 @@
+ Copies metadata blocks from /dev/sda1 device to sda1.out file
+ 
+ [root@node1 ~] o2image -I /dev/sda1 sda1.out
+-\fBUse with CAUTION\fR. Copies meta-data blocks from sda1.out onto the /dev/sda1 device.
++\fBUse with CAUTION\fR. Copies meta-data blocks from sda1.out onto the
++/dev/sda1 device.
+ .TE
+ 
+ .SH "SEE ALSO"
