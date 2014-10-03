@@ -30,6 +30,8 @@
  * pass2.c: verify directory entries, record some linkage metadata
  * pass3.c: make sure all dirs are reachable
  * pass4.c: resolve inode's link counts, move disconnected inodes to lost+found
+ * pass5.c: load global quota file, merge node-local quota files to global
+ *          quota file, recompute quota usage and recreate quota files
  *
  * When hacking on this keep the following in mind:
  *
@@ -65,6 +67,7 @@
 #include "pass2.h"
 #include "pass3.h"
 #include "pass4.h"
+#include "pass5.h"
 #include "problem.h"
 #include "util.h"
 #include "slot_recovery.h"
@@ -115,12 +118,13 @@ static void block_signals(int how)
 static void print_usage(void)
 {
 	fprintf(stderr,
-		"Usage: fsck.ocfs2 [ -fGnuvVy ] [ -b superblock block ]\n"
+		"Usage: fsck.ocfs2 {-y|-n|-p} [ -fGnuvVy ] [ -b superblock block ]\n"
 		"		    [ -B block size ] [-r num] device\n"
 		"\n"
 		"Critical flags for emergency repair:\n" 
 		" -n		Check but don't change the file system\n"
 		" -y		Answer 'yes' to all repair questions\n"
+		" -p		Automatic repair (no questions, only safe repairs)\n"
 		" -f		Force checking even if file system is clean\n"
 		" -F		Ignore cluster locking (dangerous!)\n"
 		" -r		restore backup superblock(dangerous!)\n"
@@ -639,6 +643,7 @@ int main(int argc, char **argv)
 	ost->ost_ask = 1;
 	ost->ost_dirblocks.db_root = RB_ROOT;
 	ost->ost_dir_parents = RB_ROOT;
+	ost->ost_refcount_trees = RB_ROOT;
 
 	/* These mean "autodetect" */
 	blksize = 0;
@@ -650,7 +655,7 @@ int main(int argc, char **argv)
 	setlinebuf(stderr);
 	setlinebuf(stdout);
 
-	while((c = getopt(argc, argv, "b:B:fFGnuvVyr:")) != EOF) {
+	while((c = getopt(argc, argv, "b:B:DfFGnupavVyr:")) != EOF) {
 		switch (c) {
 			case 'b':
 				blkno = read_number(optarg);
@@ -675,6 +680,9 @@ int main(int argc, char **argv)
 					goto out;
 				}
 				break;
+			case 'D':
+				ost->ost_compress_dirs = 1;
+				break;
 
 			case 'F':
 				ost->ost_skip_o2cb = 1;
@@ -689,10 +697,23 @@ int main(int argc, char **argv)
 				break;
 
 			case 'n':
-				ost->ost_ask = 0;
-				ost->ost_answer = 0;
 				open_flags &= ~OCFS2_FLAG_RW;
 				open_flags |= OCFS2_FLAG_RO;
+				/* Fall through */
+
+			case 'a':
+			case 'p':
+				/*
+				 * Like extN, -a maps to -p, which is
+				 * 'preen'.  This means only fix things
+				 * that don't require human interaction.
+				 * Unlike extN, this is only journal
+				 * replay for now.  To make it smarter,
+				 * ost->ost_answer needs to learn a
+				 * new mode.
+				 */
+				ost->ost_ask = 0;
+				ost->ost_answer = 0;
 				break;
 
 			case 'y':
@@ -723,6 +744,13 @@ int main(int argc, char **argv)
 				goto out;
 				break;
 		}
+	}
+
+	if (!(open_flags & OCFS2_FLAG_RW) && ost->ost_compress_dirs) {
+		fprintf(stderr, "Compress directories (-D) incompatible with read-only mode\n");
+		fsck_mask |= FSCK_USAGE;
+		print_usage();
+		goto out;
 	}
 
 	if (blksize % OCFS2_MIN_BLOCKSIZE) {
@@ -939,6 +967,12 @@ int main(int argc, char **argv)
 	ret = o2fsck_pass4(ost);
 	if (ret) {
 		com_err(whoami, ret, "while performing pass 4");
+		goto done;
+	}
+
+	ret = o2fsck_pass5(ost);
+	if (ret) {
+		com_err(whoami, ret, "while performing pass 5");
 		goto done;
 	}
 

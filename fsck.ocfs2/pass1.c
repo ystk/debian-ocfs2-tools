@@ -71,6 +71,7 @@
 #include "problem.h"
 #include "util.h"
 #include "xattr.h"
+#include "refcount.h"
 
 static const char *whoami = "pass1";
 
@@ -513,6 +514,26 @@ static void o2fsck_verify_inode_fields(ocfs2_filesys *fs,
 		o2fsck_write_inode(ost, blkno, di);
 	}
 
+	if ((di->i_dyn_features & OCFS2_HAS_REFCOUNT_FL) &&
+	    !ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)) &&
+	    prompt(ost, PY, PR_REFCOUNT_FLAG_INVALID,
+		   "Inode %"PRIu64" has refcount flag set but the volume "
+		   "doesn't support it. Clear it?", (uint64_t)di->i_blkno)) {
+
+		di->i_dyn_features &= ~OCFS2_HAS_REFCOUNT_FL;
+		o2fsck_write_inode(ost, blkno, di);
+	}
+
+	if (ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)) &&
+	    (!(di->i_dyn_features & OCFS2_HAS_REFCOUNT_FL) &&
+	       di->i_refcount_loc) &&
+	    prompt(ost, PY, PR_REFCOUNT_LOC_INVALID,
+		   "Inode %"PRIu64" doesn't have refcount flag set but have "
+		   "refcount loc set. Clear it?", (uint64_t)di->i_blkno)) {
+		di->i_refcount_loc = 0;
+		o2fsck_write_inode(ost, blkno, di);
+	}
+
 	if (S_ISDIR(di->i_mode)) {
 		o2fsck_bitmap_set(ost->ost_dir_inodes, blkno, NULL);
 		o2fsck_add_dir_parent(&ost->ost_dir_parents, blkno, 0, 0,
@@ -760,6 +781,57 @@ static int clear_block(ocfs2_filesys *fs,
 	return 0;
 }
 
+
+static errcode_t o2fsck_check_dx_dir(o2fsck_state *ost, struct ocfs2_dinode *di)
+{
+	errcode_t ret = 0;
+	char *buf = NULL;
+	struct ocfs2_dx_root_block *dx_root;
+	ocfs2_filesys *fs = ost->ost_fs;
+	struct extent_info ei = {0,};
+	int changed = 0;
+
+	if (!ocfs2_supports_indexed_dirs(OCFS2_RAW_SB(fs->fs_super)))
+		goto out;
+
+	if (!ocfs2_dir_indexed(di))
+		goto out;
+
+	ret = ocfs2_malloc_block(fs->fs_io, &buf);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_read_dx_root(fs, (uint64_t)di->i_dx_root, buf);
+	if (ret)
+		goto out;
+
+	dx_root = (struct ocfs2_dx_root_block *)buf;
+	if (dx_root->dr_flags & OCFS2_DX_FLAG_INLINE)
+		goto out;
+
+	ei.chk_rec_func = o2fsck_check_extent_rec;
+	ei.mark_rec_alloc_func = o2fsck_mark_tree_clusters_allocated;
+	ei.para = di;
+
+	ret = check_el(ost, &ei, di->i_blkno, &dx_root->dr_list,
+			ocfs2_extent_recs_per_dx_root(fs->fs_blocksize),
+			&changed);
+	if (ret)
+		goto out;
+
+	if (changed) {
+		ret = ocfs2_write_dx_root(fs, (uint64_t)di->i_dx_root, (char *)dx_root);
+		if (ret)
+			com_err(whoami, ret, "while writing an updated "
+				"dx_root block at %"PRIu64" for inode %"PRIu64,
+				(uint64_t)di->i_dx_root, (uint64_t)di->i_blkno);
+	}
+out:
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}
+
 /*
  * this verifies i_size and i_clusters for inodes that use i_list to
  * reference extents of data.
@@ -812,6 +884,13 @@ static errcode_t o2fsck_check_blocks(ocfs2_filesys *fs, o2fsck_state *ost,
 	if (ret) {
 		com_err(whoami, ret, "while iterating over the blocks for "
 			"inode %"PRIu64, (uint64_t)di->i_blkno);
+		goto out;
+	}
+
+	ret = o2fsck_check_dx_dir(ost, di);
+	if (ret) {
+		com_err(whoami, ret, "while iterating over the dir indexed "
+			"tree for directory inode %"PRIu64, (uint64_t)di->i_blkno);
 		goto out;
 	}
 
@@ -871,13 +950,8 @@ size_cluster_check:
 	 * less than the max inline data size.
 	 */
 	if (di->i_dyn_features & OCFS2_INLINE_DATA_FL) {
-		uint16_t max_inline;
-
-		if (di->i_dyn_features & OCFS2_INLINE_XATTR_FL)
-			max_inline = ocfs2_max_inline_data(fs->fs_blocksize) -
-				     di->i_xattr_inline_size;
-		else
-			max_inline = ocfs2_max_inline_data(fs->fs_blocksize);
+		uint16_t max_inline =
+			ocfs2_max_inline_data_with_xattr(fs->fs_blocksize, di);
 
 		/* id_count is check first. */
 		if (di->id2.i_data.id_count != max_inline &&
@@ -1401,6 +1475,10 @@ errcode_t o2fsck_pass1(o2fsck_state *ost)
 					o2fsck_verify_inode_fields(fs, ost,
 								   blkno, di);
 				if (di->i_flags & OCFS2_VALID_FL) {
+					ret = o2fsck_check_refcount_tree(ost,
+									 di);
+					if (ret)
+						goto out;
 					ret = o2fsck_check_blocks(fs, ost,
 								  blkno, di);
 					if (ret)
@@ -1419,6 +1497,9 @@ errcode_t o2fsck_pass1(o2fsck_state *ost)
 
 	mark_local_allocs(ost);
 	mark_truncate_logs(ost);
+	ret = o2fsck_check_mark_refcounted_clusters(ost);
+	if (ret)
+		com_err(whoami, ret, "while checking refcounted clusters");
 	write_cluster_alloc(ost);
 	write_inode_alloc(ost);
 

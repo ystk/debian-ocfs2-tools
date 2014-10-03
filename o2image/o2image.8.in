@@ -1,4 +1,4 @@
-.TH "o2image" "8" "April 2009" "Version @VERSION@" "OCFS2 Manual Pages"
+.TH "o2image" "8" "September 2010" "Version @VERSION@" "OCFS2 Manual Pages"
 .SH "NAME"
 o2image \- Copy or restore \fIOCFS2\fR file system meta-data
 .SH "SYNOPSIS"
@@ -37,6 +37,10 @@ and let the tool create the image-file in the packed format.
 Restores meta-data from the image-file onto the device. \fBCAUTION: This option could
 corrupt the file system.\fR
 
+.TP
+\fB\-i\fR
+Interactive mode - before writing out the image file print it's size and ask whether to proceed. This setting only applies when '-I' is not specified. It can be useful when the file system holding the image is low on disk space and the user might need to free up space once the target image size is calculated.
+
 .SH "EXAMPLES"
 
 .TS
@@ -57,4 +61,4 @@ Copies metadata blocks from /dev/sda1 device to sda1.out file
 Oracle Corporation
 
 .SH "COPYRIGHT"
-Copyright \(co 2007, 2009 Oracle. All rights reserved.
+Copyright \(co 2007, 2010 Oracle. All rights reserved.

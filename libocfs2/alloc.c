@@ -34,6 +34,7 @@
 static errcode_t ocfs2_chain_alloc_with_io(ocfs2_filesys *fs,
 					   ocfs2_cached_inode *cinode,
 					   uint64_t *gd_blkno,
+					   uint16_t *suballoc_bit,
 					   uint64_t *bitno)
 {
 	errcode_t ret;
@@ -44,7 +45,7 @@ static errcode_t ocfs2_chain_alloc_with_io(ocfs2_filesys *fs,
 			return ret;
 	}
 
-	ret = ocfs2_chain_alloc(fs, cinode, gd_blkno, bitno);
+	ret = ocfs2_chain_alloc(fs, cinode, gd_blkno, suballoc_bit, bitno);
 	if (ret)
 		return ret;
 
@@ -120,16 +121,24 @@ static int ocfs2_clusters_per_group(int block_size, int cluster_size_bits)
 	return (megabytes << ONE_MB_SHIFT) >> cluster_size_bits;
 }
 
-static inline void ocfs2_zero_dinode_id2(int blocksize,
-					 struct ocfs2_dinode *di)
+static void ocfs2_zero_dinode_id2_with_xattr(int blocksize,
+					     struct ocfs2_dinode *di)
 {
-	memset(&di->id2, 0, blocksize - offsetof(struct ocfs2_dinode, id2));
+	unsigned int xattrsize = di->i_xattr_inline_size;
+
+	if (di->i_dyn_features & OCFS2_INLINE_XATTR_FL)
+		memset(&di->id2, 0, blocksize -
+				    offsetof(struct ocfs2_dinode, id2) -
+				    xattrsize);
+	else
+		memset(&di->id2, 0, blocksize -
+				    offsetof(struct ocfs2_dinode, id2));
 }
 
 void ocfs2_dinode_new_extent_list(ocfs2_filesys *fs,
 				  struct ocfs2_dinode *di)
 {
-	ocfs2_zero_dinode_id2(fs->fs_blocksize, di);
+	ocfs2_zero_dinode_id2_with_xattr(fs->fs_blocksize, di);
 
 	di->id2.i_list.l_tree_depth = 0;
 	di->id2.i_list.l_next_free_rec = 0;
@@ -140,15 +149,17 @@ void ocfs2_set_inode_data_inline(ocfs2_filesys *fs, struct ocfs2_dinode *di)
 {
 	struct ocfs2_inline_data *idata = &di->id2.i_data;
 
-	ocfs2_zero_dinode_id2(fs->fs_blocksize, di);
+	ocfs2_zero_dinode_id2_with_xattr(fs->fs_blocksize, di);
 
-	idata->id_count = ocfs2_max_inline_data(fs->fs_blocksize);
+	idata->id_count =
+		ocfs2_max_inline_data_with_xattr(fs->fs_blocksize, di);
 
 	di->i_dyn_features |= OCFS2_INLINE_DATA_FL;
 }
 
 static void ocfs2_init_inode(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 			     int16_t slot, uint64_t gd_blkno,
+			     uint16_t suballoc_bit,
 			     uint64_t blkno, uint16_t mode,
 			     uint32_t flags)
 {
@@ -159,7 +170,8 @@ static void ocfs2_init_inode(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 	di->i_fs_generation = fs->fs_super->i_fs_generation;
 	di->i_blkno = blkno;
 	di->i_suballoc_slot = slot;
-	di->i_suballoc_bit = (uint16_t)(blkno - gd_blkno);
+	di->i_suballoc_loc = gd_blkno;
+	di->i_suballoc_bit = suballoc_bit;
 	di->i_uid = di->i_gid = 0;
 	di->i_mode = mode;
 	if (S_ISDIR(di->i_mode))
@@ -206,13 +218,15 @@ static void ocfs2_init_inode(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 
 static void ocfs2_init_eb(ocfs2_filesys *fs,
 			  struct ocfs2_extent_block *eb,
-			  uint64_t gd_blkno, uint64_t blkno)
+			  uint64_t gd_blkno, uint16_t suballoc_bit,
+			  uint64_t blkno)
 {
 	strcpy((char *)eb->h_signature, OCFS2_EXTENT_BLOCK_SIGNATURE);
 	eb->h_fs_generation = fs->fs_super->i_fs_generation;
 	eb->h_blkno = blkno;
 	eb->h_suballoc_slot = 0;
-	eb->h_suballoc_bit = (uint16_t)(blkno - gd_blkno);
+	eb->h_suballoc_loc = gd_blkno;
+	eb->h_suballoc_bit = suballoc_bit;
 	eb->h_list.l_count = ocfs2_extent_recs_per_eb(fs->fs_blocksize);
 }
 
@@ -221,6 +235,7 @@ errcode_t ocfs2_new_inode(ocfs2_filesys *fs, uint64_t *ino, int mode)
 	errcode_t ret;
 	char *buf;
 	uint64_t gd_blkno;
+	uint16_t suballoc_bit;
 	struct ocfs2_dinode *di;
 
 	ret = ocfs2_malloc_block(fs->fs_io, &buf);
@@ -233,13 +248,13 @@ errcode_t ocfs2_new_inode(ocfs2_filesys *fs, uint64_t *ino, int mode)
 		goto out;
 
 	ret = ocfs2_chain_alloc_with_io(fs, fs->fs_inode_allocs[0],
-					&gd_blkno, ino);
+					&gd_blkno, &suballoc_bit, ino);
 	if (ret == OCFS2_ET_BIT_NOT_FOUND) {
 		ret = ocfs2_chain_add_group(fs, fs->fs_inode_allocs[0]);
 		if (ret)
 			goto out;
 		ret = ocfs2_chain_alloc_with_io(fs, fs->fs_inode_allocs[0],
-						&gd_blkno, ino);
+						&gd_blkno, &suballoc_bit, ino);
 		if (ret)
 			goto out;
 	} else if (ret)
@@ -247,7 +262,8 @@ errcode_t ocfs2_new_inode(ocfs2_filesys *fs, uint64_t *ino, int mode)
 
 	memset(buf, 0, fs->fs_blocksize);
 	di = (struct ocfs2_dinode *)buf;
-	ocfs2_init_inode(fs, di, 0, gd_blkno, *ino, mode, OCFS2_VALID_FL);
+	ocfs2_init_inode(fs, di, 0, gd_blkno, suballoc_bit,
+			 *ino, mode, OCFS2_VALID_FL);
 
 	ret = ocfs2_write_inode(fs, *ino, buf);
 	if (ret)
@@ -265,6 +281,7 @@ errcode_t ocfs2_new_system_inode(ocfs2_filesys *fs, uint64_t *ino,
 	errcode_t ret;
 	char *buf;
 	uint64_t gd_blkno;
+	uint16_t suballoc_bit;
 	struct ocfs2_dinode *di;
 
 	ret = ocfs2_malloc_block(fs->fs_io, &buf);
@@ -277,20 +294,20 @@ errcode_t ocfs2_new_system_inode(ocfs2_filesys *fs, uint64_t *ino,
 		goto out;
 
 	ret = ocfs2_chain_alloc_with_io(fs, fs->fs_system_inode_alloc,
-					&gd_blkno, ino);
+					&gd_blkno, &suballoc_bit, ino);
 	if (ret == OCFS2_ET_BIT_NOT_FOUND) {
 		ret = ocfs2_chain_add_group(fs, fs->fs_system_inode_alloc);
 		if (ret)
 			goto out;
 		ret = ocfs2_chain_alloc_with_io(fs, fs->fs_system_inode_alloc,
-						&gd_blkno, ino);
+						&gd_blkno, &suballoc_bit, ino);
 		if (ret)
 			goto out;
 	}
 
 	memset(buf, 0, fs->fs_blocksize);
 	di = (struct ocfs2_dinode *)buf;
-	ocfs2_init_inode(fs, di, -1, gd_blkno, *ino, mode,
+	ocfs2_init_inode(fs, di, -1, gd_blkno, suballoc_bit, *ino, mode,
 			 (flags | OCFS2_VALID_FL | OCFS2_SYSTEM_FL));
 
 	ret = ocfs2_write_inode(fs, *ino, buf);
@@ -337,7 +354,8 @@ errcode_t ocfs2_delete_inode(ocfs2_filesys *fs, uint64_t ino)
 	if (ret)
 		goto out;
 
-	di->i_flags &= ~OCFS2_VALID_FL;
+	di->i_flags &= ~(OCFS2_VALID_FL | OCFS2_ORPHANED_FL);
+	di->i_dtime = time(NULL);
 	ret = ocfs2_write_inode(fs, di->i_blkno, buf);
 
 out:
@@ -380,6 +398,7 @@ errcode_t ocfs2_new_extent_block(ocfs2_filesys *fs, uint64_t *blkno)
 	errcode_t ret;
 	char *buf;
 	uint64_t gd_blkno;
+	uint16_t suballoc_bit;
 	struct ocfs2_extent_block *eb;
 
 	ret = ocfs2_malloc_block(fs->fs_io, &buf);
@@ -392,13 +411,14 @@ errcode_t ocfs2_new_extent_block(ocfs2_filesys *fs, uint64_t *blkno)
 		goto out;
 
 	ret = ocfs2_chain_alloc_with_io(fs, fs->fs_eb_allocs[0],
-					&gd_blkno, blkno);
+					&gd_blkno, &suballoc_bit, blkno);
 	if (ret == OCFS2_ET_BIT_NOT_FOUND) {
 		ret = ocfs2_chain_add_group(fs, fs->fs_eb_allocs[0]);
 		if (ret)
 			goto out;
 		ret = ocfs2_chain_alloc_with_io(fs, fs->fs_eb_allocs[0],
-						&gd_blkno, blkno);
+						&gd_blkno, &suballoc_bit,
+						blkno);
 		if (ret)
 			goto out;
 	} else if (ret)
@@ -406,7 +426,7 @@ errcode_t ocfs2_new_extent_block(ocfs2_filesys *fs, uint64_t *blkno)
 
 	memset(buf, 0, fs->fs_blocksize);
 	eb = (struct ocfs2_extent_block *)buf;
-	ocfs2_init_eb(fs, eb, gd_blkno, *blkno);
+	ocfs2_init_eb(fs, eb, gd_blkno, suballoc_bit, *blkno);
 
 	ret = ocfs2_write_extent_block(fs, *blkno, buf);
 
@@ -483,6 +503,101 @@ out:
 	return ret;
 }
 
+errcode_t ocfs2_delete_refcount_block(ocfs2_filesys *fs, uint64_t blkno)
+{
+	errcode_t ret;
+	char *buf;
+	struct ocfs2_refcount_block *rb;
+	int slot;
+
+	ret = ocfs2_malloc_block(fs->fs_io, &buf);
+	if (ret)
+		return ret;
+
+	ret = ocfs2_read_refcount_block(fs, blkno, buf);
+	if (ret)
+		goto out;
+	rb = (struct ocfs2_refcount_block *)buf;
+	slot = rb->rf_suballoc_slot;
+
+	ret = ocfs2_load_allocator(fs, EXTENT_ALLOC_SYSTEM_INODE, slot,
+				   &fs->fs_eb_allocs[slot]);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_chain_free_with_io(fs, fs->fs_eb_allocs[slot], blkno);
+
+out:
+	ocfs2_free(&buf);
+
+	return ret;
+}
+
+static void ocfs2_init_rb(ocfs2_filesys *fs,
+			  struct ocfs2_refcount_block *rb,
+			  uint64_t gd_blkno, uint16_t suballoc_bit,
+			  uint64_t blkno,
+			  uint64_t root_blkno, uint32_t rf_generation)
+{
+	strcpy((void *)rb, OCFS2_REFCOUNT_BLOCK_SIGNATURE);
+	rb->rf_fs_generation = fs->fs_super->i_fs_generation;
+	rb->rf_blkno = blkno;
+	rb->rf_suballoc_slot = 0;
+	rb->rf_suballoc_loc = gd_blkno;
+	rb->rf_suballoc_bit = suballoc_bit;
+	rb->rf_parent = root_blkno;
+	if (root_blkno)
+		rb->rf_flags = OCFS2_REFCOUNT_LEAF_FL;
+	rb->rf_records.rl_count = ocfs2_refcount_recs_per_rb(fs->fs_blocksize);
+	rb->rf_generation = rf_generation;
+}
+
+errcode_t ocfs2_new_refcount_block(ocfs2_filesys *fs, uint64_t *blkno,
+				   uint64_t root_blkno, uint32_t rf_generation)
+{
+	errcode_t ret;
+	char *buf;
+	uint64_t gd_blkno;
+	uint16_t suballoc_bit;
+	struct ocfs2_refcount_block *rb;
+
+	ret = ocfs2_malloc_block(fs->fs_io, &buf);
+	if (ret)
+		return ret;
+
+	ret = ocfs2_load_allocator(fs, EXTENT_ALLOC_SYSTEM_INODE,
+				   0, &fs->fs_eb_allocs[0]);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_chain_alloc_with_io(fs, fs->fs_eb_allocs[0],
+					&gd_blkno, &suballoc_bit, blkno);
+	if (ret == OCFS2_ET_BIT_NOT_FOUND) {
+		ret = ocfs2_chain_add_group(fs, fs->fs_eb_allocs[0]);
+		if (ret)
+			goto out;
+		ret = ocfs2_chain_alloc_with_io(fs, fs->fs_eb_allocs[0],
+						&gd_blkno, &suballoc_bit,
+						blkno);
+		if (ret)
+			goto out;
+	} else if (ret)
+		goto out;
+
+	memset(buf, 0, fs->fs_blocksize);
+	rb = (struct ocfs2_refcount_block *)buf;
+
+	ocfs2_init_rb(fs, rb, gd_blkno, suballoc_bit,
+		      *blkno, root_blkno, rf_generation);
+
+	ret = ocfs2_write_refcount_block(fs, *blkno, buf);
+
+out:
+	ocfs2_free(&buf);
+
+	return ret;
+}
+
 errcode_t ocfs2_grow_chain_allocator(ocfs2_filesys *fs, int type,
 				     int slot_num, uint32_t num_clusters)
 {
@@ -519,6 +634,109 @@ errcode_t ocfs2_grow_chain_allocator(ocfs2_filesys *fs, int type,
 	}
 
 out:
+	return ret;
+}
+
+/* only initiate part of dx_root:
+ *   dr_subllaoc_slot
+ *   dr_sbualloc_bit
+ *   dr_fs_generation
+ *   dr_blkno
+ *   dr_flags
+ */
+static void init_dx_root(ocfs2_filesys *fs,
+			struct ocfs2_dx_root_block *dx_root,
+			int slot, uint64_t gd_blkno,
+			uint16_t suballoc_bit, uint64_t dr_blkno)
+{
+
+	memset(dx_root, 0, fs->fs_blocksize);
+	strcpy((char *)dx_root->dr_signature, OCFS2_DX_ROOT_SIGNATURE);
+	dx_root->dr_suballoc_slot = slot;
+	dx_root->dr_suballoc_loc = gd_blkno;
+	dx_root->dr_suballoc_bit = suballoc_bit;
+	dx_root->dr_fs_generation = fs->fs_super->i_fs_generation;
+	dx_root->dr_blkno = dr_blkno;
+	dx_root->dr_flags |= OCFS2_DX_FLAG_INLINE;
+}
+
+errcode_t ocfs2_new_dx_root(ocfs2_filesys *fs,
+				struct ocfs2_dinode *di,
+				uint64_t *dr_blkno)
+{
+	errcode_t ret;
+	char *buf = NULL;
+	uint64_t gd_blkno;
+	uint16_t suballoc_bit;
+	struct ocfs2_dx_root_block *dx_root;
+	int slot;
+
+	ret = ocfs2_malloc_block(fs->fs_io, &buf);
+	if (ret)
+		goto out;
+
+	slot = di->i_suballoc_slot;
+	if (slot == (uint16_t)OCFS2_INVALID_SLOT)
+		slot = 0;
+
+	ret = ocfs2_load_allocator(fs, EXTENT_ALLOC_SYSTEM_INODE,
+				slot, &fs->fs_eb_allocs[slot]);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_chain_alloc_with_io(fs, fs->fs_eb_allocs[slot],
+					&gd_blkno, &suballoc_bit, dr_blkno);
+	if (ret == OCFS2_ET_BIT_NOT_FOUND) {
+		ret = ocfs2_chain_add_group(fs, fs->fs_eb_allocs[slot]);
+		if (ret)
+			goto out;
+		ret = ocfs2_chain_alloc_with_io(fs, fs->fs_eb_allocs[slot],
+						&gd_blkno, &suballoc_bit,
+						dr_blkno);
+		if (ret)
+			goto out;
+	} else if (ret)
+		goto out;
+
+	dx_root = (struct ocfs2_dx_root_block *)buf;
+	init_dx_root(fs, dx_root, slot, gd_blkno, suballoc_bit, *dr_blkno);
+
+	ret = ocfs2_write_dx_root(fs, *dr_blkno, (char *)dx_root);
+out:
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}
+
+errcode_t ocfs2_delete_dx_root(ocfs2_filesys *fs, uint64_t dr_blkno)
+{
+	errcode_t ret;
+	char *buf = NULL;
+	struct ocfs2_dx_root_block *dx_root;
+	int slot;
+
+	ret = ocfs2_malloc_block(fs->fs_io, &buf);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_read_dx_root(fs, dr_blkno, buf);
+	if (ret)
+		goto out;
+
+	dx_root = (struct ocfs2_dx_root_block *)buf;
+	slot = dx_root->dr_suballoc_slot;
+
+	ret = ocfs2_load_allocator(fs, EXTENT_ALLOC_SYSTEM_INODE, slot,
+				&fs->fs_eb_allocs[slot]);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_chain_free_with_io(fs, fs->fs_eb_allocs[slot], dr_blkno);
+
+out:
+	if (buf)
+		ocfs2_free(&buf);
+
 	return ret;
 }
 

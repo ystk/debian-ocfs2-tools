@@ -139,6 +139,9 @@ static void ocfs2_swap_inode_second(struct ocfs2_dinode *di)
 		sb->s_uuid_hash           = bswap_32(sb->s_uuid_hash);
 		sb->s_first_cluster_group = bswap_64(sb->s_first_cluster_group);
 		sb->s_xattr_inline_size   = bswap_16(sb->s_xattr_inline_size);
+		sb->s_dx_seed[0]          = bswap_32(sb->s_dx_seed[0]);
+		sb->s_dx_seed[1]          = bswap_32(sb->s_dx_seed[1]);
+		sb->s_dx_seed[2]          = bswap_32(sb->s_dx_seed[2]);
 
 	} else if (di->i_flags & OCFS2_LOCAL_ALLOC_FL) {
 		struct ocfs2_local_alloc *la = &di->id2.i_lab;
@@ -163,6 +166,8 @@ static void ocfs2_swap_inode_second(struct ocfs2_dinode *di)
 		struct ocfs2_inline_data *id = &di->id2.i_data;
 
 		id->id_count = bswap_16(id->id_count);
+	} else if (di->i_dyn_features & OCFS2_INDEXED_DIR_FL) {
+		di->i_dx_root = bswap_64(di->i_dx_root);
 	}
 }
 
@@ -193,6 +198,8 @@ static void ocfs2_swap_inode_first(struct ocfs2_dinode *di)
 	di->i_orphaned_slot = bswap_16(di->i_orphaned_slot);
 	di->i_dyn_features  = bswap_16(di->i_dyn_features);
 	di->i_xattr_loc     = bswap_64(di->i_xattr_loc);
+	di->i_refcount_loc  = bswap_64(di->i_refcount_loc);
+	di->i_suballoc_loc  = bswap_64(di->i_suballoc_loc);
 }
 
 static int has_extents(struct ocfs2_dinode *di)
@@ -215,10 +222,7 @@ static inline void ocfs2_swap_inline_dir(ocfs2_filesys *fs,
 {
 	void *de_buf = di->id2.i_data.id_data;
 	uint64_t bytes = di->id2.i_data.id_count;
-	int max_inline = ocfs2_max_inline_data(fs->fs_blocksize);
-
-	if (di->i_dyn_features & OCFS2_INLINE_XATTR_FL)
-		max_inline -= di->i_xattr_inline_size;
+	int max_inline = ocfs2_max_inline_data_with_xattr(fs->fs_blocksize, di);
 
 	/* Just in case i_xattr_inline_size is garbage */
 	if (max_inline < 0)

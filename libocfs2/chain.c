@@ -31,11 +31,8 @@
 
 #include "ocfs2/byteorder.h"
 
-void ocfs2_swap_group_desc(struct ocfs2_group_desc *gd)
+static void ocfs2_swap_group_desc_header(struct ocfs2_group_desc *gd)
 {
-	if (cpu_is_little_endian)
-		return;
-
 	gd->bg_size = bswap_16(gd->bg_size);
 	gd->bg_bits = bswap_16(gd->bg_bits);
 	gd->bg_free_bits_count = bswap_16(gd->bg_free_bits_count);
@@ -44,6 +41,30 @@ void ocfs2_swap_group_desc(struct ocfs2_group_desc *gd)
 	gd->bg_next_group = bswap_64(gd->bg_next_group);
 	gd->bg_parent_dinode = bswap_64(gd->bg_parent_dinode);
 	gd->bg_blkno = bswap_64(gd->bg_blkno);
+}
+
+void ocfs2_swap_group_desc_from_cpu(ocfs2_filesys *fs,
+				    struct ocfs2_group_desc *gd)
+{
+	if (cpu_is_little_endian)
+		return;
+
+	if (ocfs2_gd_is_discontig(gd))
+		ocfs2_swap_extent_list_from_cpu(fs, gd, &gd->bg_list);
+
+	ocfs2_swap_group_desc_header(gd);
+}
+
+void ocfs2_swap_group_desc_to_cpu(ocfs2_filesys *fs,
+				  struct ocfs2_group_desc *gd)
+{
+	if (cpu_is_little_endian)
+		return;
+
+	ocfs2_swap_group_desc_header(gd);
+
+	if (ocfs2_gd_is_discontig(gd))
+		ocfs2_swap_extent_list_to_cpu(fs, gd, &gd->bg_list);
 }
 
 errcode_t ocfs2_read_group_desc(ocfs2_filesys *fs, uint64_t blkno,
@@ -79,7 +100,7 @@ errcode_t ocfs2_read_group_desc(ocfs2_filesys *fs, uint64_t blkno,
 	memcpy(gd_buf, blk, fs->fs_blocksize);
 
 	gd = (struct ocfs2_group_desc *)gd_buf;
-	ocfs2_swap_group_desc(gd);
+	ocfs2_swap_group_desc_to_cpu(fs, gd);
 
 	ret = 0;
 out:
@@ -109,7 +130,7 @@ errcode_t ocfs2_write_group_desc(ocfs2_filesys *fs, uint64_t blkno,
 	memcpy(blk, gd_buf, fs->fs_blocksize);
 
 	gd = (struct ocfs2_group_desc *)blk;
-	ocfs2_swap_group_desc(gd);
+	ocfs2_swap_group_desc_from_cpu(fs, gd);
 
 	ocfs2_compute_meta_ecc(fs, blk, &gd->bg_check);
 	ret = io_write_block(fs->fs_io, blkno, 1, blk);
@@ -254,6 +275,33 @@ out_buf:
 	return ret;
 }
 
+uint64_t ocfs2_get_block_from_group(ocfs2_filesys *fs,
+				    struct ocfs2_group_desc *grp,
+				    int bpc, int bit_offset)
+{
+	int cpos, i;
+	struct ocfs2_extent_rec *rec;
+	int block_per_bit = ocfs2_clusters_to_blocks(fs, 1) / bpc;
+
+	if (!ocfs2_gd_is_discontig(grp))
+		return grp->bg_blkno + bit_offset * block_per_bit;
+
+	/* handle discontiguous group. */
+	cpos = bit_offset / bpc;
+	for (i = 0; i < grp->bg_list.l_next_free_rec; i++) {
+		rec = &grp->bg_list.l_recs[i];
+
+		if (rec->e_cpos <= cpos &&
+		    rec->e_cpos + rec->e_leaf_clusters > cpos)
+			break;
+	}
+
+	if (i == grp->bg_list.l_next_free_rec)
+		abort();
+
+	return rec->e_blkno + (bit_offset * block_per_bit -
+		ocfs2_clusters_to_blocks(fs, rec->e_cpos));
+}
 
 #ifdef DEBUG_EXE
 #include <stdlib.h>

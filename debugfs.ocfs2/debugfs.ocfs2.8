@@ -1,4 +1,4 @@
-.TH "debugfs.ocfs2" "8" "April 2009" "Version 1.4.4" "OCFS2 Manual Pages"
+.TH "debugfs.ocfs2" "8" "September 2010" "Version 1.6.4" "OCFS2 Manual Pages"
 .SH "NAME"
 debugfs.ocfs2 \- OCFS2 file system debugger.
 .SH "SYNOPSIS"
@@ -87,8 +87,8 @@ by \fIOCFS2\fR are generated using the inode number and its generation
 number and can be decoded using the \fIdecode\fR command or used directly
 in place of an inode number in commands requiring a \fIfilespec\fR. Like
 inode numbers, locknames need to be enclosed in angle brackets, e.g.,
-<M000000000000000040c40c044069cf>. To generate a lockname for a given object,
-use the \fIencode\fR command.
+<M000000000000000040c40c044069cf>. Use the \fIencode\fR command to generate
+all possible locknames for an object.
 
 .SH "COMMANDS"
 This is a list of the commands which debugfs.ocfs2 supports.
@@ -147,6 +147,22 @@ timestamps and permissions information on \fIoutfile\fR to match
 those of \fIfilespec\fR.
 
 .TP
+\fIdx_dump filespec\fR
+Display the indexed directory information for the given directory.
+
+.TP
+\fIdx_leaf <block#>\fR
+Display the contents of the given indexed directory leaf block.
+
+.TP
+\fIdx_root <block#>\fR
+Display the contents of the given indexed directory root block.
+
+.TP
+\fIdx_space filespec\fR
+Display the directory free space list.
+
+.TP
 \fIencode filespec\fR
 Display the lockname for the \fIfilespec\fR.
 
@@ -158,6 +174,10 @@ Display the contents of the extent structure at \fIblock#\fR.
 \fIfindpath [<lockname>|<inode#>]\fR
 Display the pathname for the inode specified by \fIlockname\fR or \fIinode#\fR. This
 command does not display all the hard-linked paths for the inode.
+
+.TP
+\fIfrag filespec\fR
+Display the inode's number of extents to clusters ratio.
 
 .TP
 \fIfs_locks [-f <file>] [-l] [-B] [<lockname(s)>]...\fR
@@ -223,12 +243,20 @@ the \fIoutdir\fR which should be an existing directory on the native
 filesystem.
 
 .TP
+\fIrefcount [\-e] filespec\fR
+Display the refcount block, and optionally its tree, of the specified inode.
+
+.TP
 \fIslotmap\fR
 Display the contents of the \fIslotmap\fR system file.
 
 .TP
-\fIstat filespec\fR
-Display the contents of the inode structure for the \fIfilespec\fR.
+\fIstat [\-t|\-T] filespec\fR
+Display the contents of the inode structure for the \fIfilespec\fR.  The
+\fI-t\fR ("traverse") option selects traversal of the inode's metadata.
+The extent tree, chain list, or other extra metadata will be dumped.  This
+is the default.  The \fI-T\fR option turns off traversal to reduce the I/O
+required when basic inode information is needed.
 
 .TP
 \fIstats [\-h] [\-s backup\-number]\fR
@@ -255,4 +283,4 @@ This tool has been modelled after \fBdebugfs\fR, a debugging tool for ext2.
 Oracle Corporation
 
 .SH "COPYRIGHT"
-Copyright \(co 2004, 2009 Oracle. All rights reserved.
+Copyright \(co 2004, 2010 Oracle. All rights reserved.

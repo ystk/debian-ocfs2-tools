@@ -18,13 +18,17 @@ UNINST_LIBRARIES = libocfs2ne.a
 
 OCFS2NE_FEATURES =			\
 	feature_backup_super		\
+	feature_discontig_bg		\
 	feature_extended_slotmap	\
 	feature_inline_data		\
 	feature_local			\
 	feature_metaecc			\
+	feature_refcount		\
 	feature_sparse_files		\
 	feature_unwritten_extents	\
-	feature_xattr
+	feature_xattr			\
+	feature_indexed_dirs		\
+	feature_quota
 
 OCFS2NE_OPERATIONS =			\
 	op_cloned_volume		\
@@ -36,7 +40,8 @@ OCFS2NE_OPERATIONS =			\
 	op_set_label			\
 	op_set_journal_size		\
 	op_set_slot_count		\
-	op_update_cluster_stack
+	op_update_cluster_stack		\
+	op_set_quota_sync_interval	\
 
 sbindir = $(root_sbindir)
 SBIN_PROGRAMS = tunefs.ocfs2

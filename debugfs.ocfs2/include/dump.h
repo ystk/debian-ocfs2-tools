@@ -50,9 +50,14 @@ void dump_extent_list (FILE *out, struct ocfs2_extent_list *ext);
 void dump_chain_list (FILE *out, struct ocfs2_chain_list *cl);
 void dump_extent_block (FILE *out, struct ocfs2_extent_block *blk);
 void dump_group_descriptor (FILE *out, struct ocfs2_group_desc *grp, int index);
-int  dump_dir_entry (struct ocfs2_dir_entry *rec, int offset, int blocksize,
+int  dump_dir_entry (struct ocfs2_dir_entry *rec, uint64_t blocknr, int offset, int blocksize,
 		     char *buf, void *priv_data);
+void dump_dx_root (FILE *out, struct ocfs2_dx_root_block *dx_root);
+void dump_dx_leaf (FILE *out, struct ocfs2_dx_leaf *dx_leaf);
 void dump_dir_block(FILE *out, char *buf);
+void dump_dx_entries(FILE *out, struct ocfs2_dinode *inode);
+void dump_dx_space(FILE *out, struct ocfs2_dinode *inode,
+		   struct ocfs2_dx_root_block *dx_root);
 void dump_jbd_header (FILE *out, journal_header_t *header);
 void dump_jbd_superblock (FILE *out, journal_superblock_t *jsb);
 void dump_jbd_block (FILE *out, journal_superblock_t *jsb,
@@ -68,7 +73,7 @@ void dump_inode_path (FILE *out, uint64_t blkno, char *path);
 void dump_logical_blkno(FILE *out, uint64_t blkno);
 void dump_icheck(FILE *out, int hdr, uint64_t blkno, uint64_t inode,
 		 int validoffset, uint64_t offset, int status);
-void dump_block_check(FILE *out, struct ocfs2_block_check *bc);
+void dump_block_check(FILE *out, struct ocfs2_block_check *bc, void *block);
 uint32_t dump_xattr_ibody(FILE *out, ocfs2_filesys *fs,
 			  struct ocfs2_dinode *in, int verbose);
 errcode_t dump_xattr_block(FILE *out, ocfs2_filesys *fs,
@@ -78,5 +83,7 @@ errcode_t dump_xattr_block(FILE *out, ocfs2_filesys *fs,
 			   int verbose);
 void dump_frag(FILE *out, uint64_t ino, uint32_t clusters,
 	       uint32_t extents);
+void dump_refcount_block(FILE *out, struct ocfs2_refcount_block *rb);
+void dump_refcount_records(FILE *out, struct ocfs2_refcount_block *rb);
 
 #endif		/* __DUMP_H__ */

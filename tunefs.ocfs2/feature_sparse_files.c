@@ -53,6 +53,7 @@ struct sparse_file {
 	uint32_t holes_num;
 	uint32_t hole_clusters;
 	int truncate;
+	uint32_t old_clusters;
 };
 
 struct fill_hole_context {
@@ -301,6 +302,7 @@ static errcode_t hole_iterate(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 
 	file->blkno = di->i_blkno;
 	INIT_LIST_HEAD(&file->holes);
+	file->old_clusters = di->i_clusters;
 	ret = find_holes_in_file(fs, di, file);
 	if (ret)
 		goto bail;
@@ -402,7 +404,7 @@ static errcode_t fill_one_hole(ocfs2_filesys *fs, struct sparse_file *file,
 		if (ret)
 			break;
 
-		ret = ocfs2_insert_extent(fs, file->blkno,
+		ret = ocfs2_inode_insert_extent(fs, file->blkno,
 					  start, p_start,
 					  n_clusters, 0);
 		if (ret)
@@ -440,12 +442,14 @@ static errcode_t fill_one_file(ocfs2_filesys *fs, struct sparse_file *file,
 static errcode_t fill_sparse_files(ocfs2_filesys *fs,
 				   struct fill_hole_context *ctxt)
 {
-	errcode_t ret = 0;
+	errcode_t ret = 0, err;
 	char *buf = NULL;
 	struct ocfs2_dinode *di = NULL;
 	struct list_head *pos;
 	struct sparse_file *file;
 	struct tools_progress *prog;
+	ocfs2_quota_hash *usrhash = NULL, *grphash = NULL;
+	struct ocfs2_super_block *super = OCFS2_RAW_SB(fs->fs_super);
 
 	prog = tools_progress_start("Filling holes", "filling",
 				    ctxt->holecount);
@@ -453,6 +457,15 @@ static errcode_t fill_sparse_files(ocfs2_filesys *fs,
 		ret = TUNEFS_ET_NO_MEMORY;
 		goto out;
 	}
+
+
+	ret = ocfs2_load_fs_quota_info(fs);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_init_quota_change(fs, &usrhash, &grphash);
+	if (ret)
+		goto out;
 
 	ret = ocfs2_malloc_block(fs->fs_io, &buf);
 	if (ret)
@@ -465,21 +478,46 @@ static errcode_t fill_sparse_files(ocfs2_filesys *fs,
 		if (ret)
 			break;
 
-		if (!file->truncate)
+		if (!file->truncate && !usrhash && !grphash)
 			continue;
 
 		ret = ocfs2_read_inode(fs, file->blkno, buf);
 		if (ret)
 			break;
 		di = (struct ocfs2_dinode *)buf;
-		ret = truncate_to_i_size(fs, di, NULL);
-		if (ret)
-			break;
+		if (file->truncate) {
+			ret = truncate_to_i_size(fs, di, NULL);
+			if (ret)
+				break;
+		}
+		if (di->i_clusters != file->old_clusters &&
+		    (!(di->i_flags & OCFS2_SYSTEM_FL) ||
+		    file->blkno == super->s_root_blkno)) {
+			long long change;
+
+			if (di->i_clusters > file->old_clusters) {
+				change = ocfs2_clusters_to_bytes(fs,
+					di->i_clusters - file->old_clusters);
+			} else {
+				change = -ocfs2_clusters_to_bytes(fs,
+					file->old_clusters - di->i_clusters);
+			}
+
+			ret = ocfs2_apply_quota_change(fs, usrhash, grphash,
+						       di->i_uid, di->i_gid,
+						       change, 0);
+			if (ret)
+				break;
+		}
 	}
 
 	ocfs2_free(&buf);
 
 out:
+	err = ocfs2_finish_quota_change(fs, usrhash, grphash);
+	if (!ret)
+		ret = err;
+
 	if (prog)
 		tools_progress_stop(prog);
 

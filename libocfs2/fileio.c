@@ -33,6 +33,7 @@
 #include <inttypes.h>
 
 #include "ocfs2/ocfs2.h"
+#include "refcount.h"
 
 struct read_whole_context {
 	char		*buf;
@@ -84,7 +85,7 @@ static errcode_t ocfs2_inline_data_read(struct ocfs2_dinode *di, void *buf,
 	p = (__u8 *) &(id->id_data);
 	p += offset;
 
-	*got = ocfs2_min((di->i_size - offset), (uint64_t)count);
+	*got = ocfs2_min((uint64_t)(di->i_size - offset), (uint64_t)count);
 	memcpy(buf, p, *got);
 
 	return 0;
@@ -302,7 +303,6 @@ static errcode_t ocfs2_file_block_write(ocfs2_cached_inode *ci,
 	uint32_t	tmp;
 	uint64_t	num_blocks;
 	int		bs_bits = OCFS2_RAW_SB(fs->fs_super)->s_blocksize_bits;
-	uint64_t	ino = ci->ci_blkno;
 	uint32_t	n_clusters, cluster_begin, cluster_end;
 	uint64_t	bpc = fs->fs_clustersize/fs->fs_blocksize;
 	int		insert = 0;
@@ -325,6 +325,17 @@ static errcode_t ocfs2_file_block_write(ocfs2_cached_inode *ci,
 
 	if (v_blkno + wanted_blocks > num_blocks)
 		wanted_blocks = (uint32_t) (num_blocks - v_blkno);
+
+	if (ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)) &&
+	    (ci->ci_inode->i_dyn_features & OCFS2_HAS_REFCOUNT_FL)) {
+		cluster_begin = ocfs2_blocks_to_clusters(fs, v_blkno);
+		cluster_end = ocfs2_blocks_to_clusters(fs,
+					       v_blkno + wanted_blocks - 1);
+		n_clusters = cluster_end - cluster_begin + 1;
+		ret = ocfs2_refcount_cow(ci, cluster_begin, n_clusters, UINT_MAX);
+		if (ret)
+			return ret;
+	}
 
 	while(wanted_blocks) {
 		ret = ocfs2_extent_map_get_blocks(ci, v_blkno, 1,
@@ -438,8 +449,14 @@ static errcode_t ocfs2_file_block_write(ocfs2_cached_inode *ci,
 					p_blkno & ~(bpc - 1));
 			if (ret)
 				return ret;
-			ocfs2_free_cached_inode(fs, ci);
-			ocfs2_read_cached_inode(fs,ino, &ci);
+			/*
+			 * We don't cache in the library right now, so any
+			 * work done in mark_extent_written won't be reflected
+			 * in our now stale copy. So refresh it.
+			 */
+			ret = ocfs2_refresh_cached_inode(fs, ci);
+			if (ret)
+				return ret;
 		}
 
 		*wrote += (contig_blocks << bs_bits);
@@ -578,7 +595,8 @@ static errcode_t ocfs2_try_to_write_inline_data(ocfs2_cached_inode *ci,
 		goto out;
 	}
 
-	if (di->i_clusters > 0 || end > ocfs2_max_inline_data(fs->fs_blocksize))
+	if (di->i_clusters > 0 ||
+	    end > ocfs2_max_inline_data_with_xattr(fs->fs_blocksize, di))
 		return OCFS2_ET_CANNOT_INLINE_DATA;
 
 	ocfs2_set_inode_data_inline(fs, ci->ci_inode);

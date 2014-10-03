@@ -29,6 +29,8 @@
 #include "icount.h"
 #include "dirblocks.h"
 
+struct refcount_file;
+
 typedef struct _o2fsck_state {
 	ocfs2_filesys 	*ost_fs;
 
@@ -58,6 +60,9 @@ typedef struct _o2fsck_state {
 
 	struct rb_root	ost_dir_parents;
 
+	struct rb_root	ost_refcount_trees;
+	struct refcount_file *ost_latest_file;
+
 	unsigned	ost_ask:1,	/* confirm with the user */
 			ost_answer:1,	/* answer if we don't ask the user */
 			ost_force:1,	/* -f supplied; force check */
@@ -73,7 +78,8 @@ typedef struct _o2fsck_state {
  			ost_stale_mounts:1, /* set when reading publish blocks
  					     * that still indicated mounted */
 			ost_fix_fs_gen:1,
-			ost_has_journal_dirty:1;
+			ost_has_journal_dirty:1,
+			ost_compress_dirs:1;
 	errcode_t ost_err;
 } o2fsck_state;
 

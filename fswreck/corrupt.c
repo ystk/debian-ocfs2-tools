@@ -28,58 +28,6 @@
 
 extern char *progname;
 
-/*
- * corrupt_chains()
- *
- */
-void corrupt_chains(ocfs2_filesys *fs, int code, uint16_t slotnum)
-{
-	errcode_t ret;
-	uint64_t blkno;
-	struct ocfs2_super_block *sb = OCFS2_RAW_SB(fs->fs_super);
-	char sysfile[40];
-
-	switch (code) {
-	case 3:
-	case 4:
-	case 5:
-	case 6:
-	case 7:
-	case 8:
-	case 10:
-	case 11:
-	case 12:
-		snprintf(sysfile, sizeof(sysfile),
-			 ocfs2_system_inodes[GLOBAL_BITMAP_SYSTEM_INODE].si_name);
-		break;
-#ifdef _LATER_
-	case X:
-		snprintf(sysfile, sizeof(sysfile),
-			 ocfs2_system_inodes[GLOBAL_INODE_ALLOC_SYSTEM_INODE].si_name);
-		break;
-	case Y: 
-		snprintf(sysfile, sizeof(sysfile),
-			 ocfs2_system_inodes[EXTENT_ALLOC_SYSTEM_INODE].si_name, slotnum);
-		break;
-	case Z:
-		snprintf(sysfile, sizeof(sysfile),
-			 ocfs2_system_inodes[INODE_ALLOC_SYSTEM_INODE].si_name, slotnum);
-		break;
-#endif
-	default:
-		FSWRK_FATAL("Invalid code=%d", code);
-	}
-
-	ret = ocfs2_lookup(fs, sb->s_system_dir_blkno, sysfile,
-			   strlen(sysfile), NULL, &blkno);
-	if (ret)
-		FSWRK_FATAL();
-
-	mess_up_chains(fs, blkno, code);
-
-	return ;
-}
-
 static void create_named_directory(ocfs2_filesys *fs, char *dirname,
 				   uint64_t *blkno)
 {
@@ -127,6 +75,7 @@ void corrupt_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
 		func = mess_up_extent_block;
 		break;
 	case EXTENT_MARKED_UNWRITTEN:
+	case EXTENT_MARKED_REFCOUNTED:
 	case EXTENT_BLKNO_UNALIGNED:
 		func = mess_up_extent_record;
 		break;
@@ -175,7 +124,7 @@ void corrupt_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
 	case INODE_COUNT:
 		func = mess_up_inode_field;
 		break;
-	case INODE_LINK_NOT_CONNECTED:
+	case INODE_NOT_CONNECTED:
 		func = mess_up_inode_not_connected;
 		break;
 	case LINK_FAST_DATA:
@@ -213,6 +162,9 @@ void corrupt_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
 		break;
 	case DIRENT_DOT_EXCESS:
 		func = mess_up_dir_dot;
+		break;
+	case DIR_DOTDOT:
+		func = mess_up_dir_dotdot;
 		break;
 	case DIRENT_ZERO:
 		func = mess_up_dir_ent;
@@ -258,6 +210,12 @@ void corrupt_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
 	case DUP_CLUSTERS_SYSFILE_CLONE:
 		func = mess_up_dup_clusters;
 		break;
+	case REFCOUNT_FLAG_INVALID:
+		func = mess_up_inode_field;
+		break;
+	case REFCOUNT_LOC_INVALID:
+		func = mess_up_inode_field;
+		break;
 	default:
 		FSWRK_FATAL("Invalid code=%d", type);
 	}
@@ -288,9 +246,6 @@ void corrupt_sys_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
 		func = mess_up_chains_rec;
 		break;
 	case CHAIN_BITS:
-		func = mess_up_chains_rec;
-		break;
-	case CLUSTER_ALLOC_BIT:
 		func = mess_up_chains_rec;
 		break;
 	case CHAIN_I_CLUSTERS:
@@ -332,6 +287,13 @@ void corrupt_sys_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
 	case JOURNAL_TOO_SMALL:
 		func = mess_up_journal;
 		break;
+	case QMAGIC_INVALID:
+	case QTREE_BLK_INVALID:
+	case DQBLK_INVALID:
+	case DUP_DQBLK_INVALID:
+	case DUP_DQBLK_VALID:
+		func = mess_up_quota;
+		break;
 	default:
 		FSWRK_FATAL("Invalid code=%d", type);
 	}
@@ -371,6 +333,9 @@ void corrupt_group_desc(ocfs2_filesys *fs, enum fsck_type type,
 		break;
 	case CLUSTER_GROUP_DESC:
 		func = mess_up_cluster_group_desc;
+		break;
+	case CLUSTER_ALLOC_BIT:
+		func = mess_up_cluster_alloc_bits;
 		break;
 	default:
 		FSWRK_FATAL("Invalid code=%d", type);
@@ -451,4 +416,49 @@ void corrupt_truncate_log(ocfs2_filesys *fs, enum fsck_type type,
 		func(fs, type, slotnum);
 
 	return;
+}
+
+void corrupt_refcount(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum)
+{
+	uint64_t blkno;
+	void (*func)(ocfs2_filesys *fs,
+		     enum fsck_type type, uint64_t blkno) = NULL;
+
+	switch (type) {
+	case RB_BLKNO:
+	case RB_GEN:
+	case RB_GEN_FIX:
+	case RB_PARENT:
+	case REFCOUNT_BLOCK_INVALID:
+	case REFCOUNT_ROOT_BLOCK_INVALID:
+	case REFCOUNT_LIST_COUNT:
+	case REFCOUNT_LIST_USED:
+	case REFCOUNT_CLUSTER_RANGE:
+	case REFCOUNT_CLUSTER_COLLISION:
+	case REFCOUNT_LIST_EMPTY:
+	case REFCOUNT_REC_REDUNDANT:
+	case REFCOUNT_COUNT_INVALID:
+	case DUP_CLUSTERS_ADD_REFCOUNT:
+		func = mess_up_refcount_tree_block;
+		break;
+	case REFCOUNT_CLUSTERS:
+	case REFCOUNT_COUNT:
+		func = mess_up_refcount_tree;
+		break;
+	default:
+		FSWRK_FATAL("Invalid code = %d", type);
+	}
+
+	create_named_directory(fs, "tmp", &blkno);
+
+	if (func)
+		func(fs, type, blkno);
+
+	return;
+}
+
+void corrupt_discontig_bg(ocfs2_filesys *fs, enum fsck_type type,
+			  uint16_t slotnum)
+{
+	mess_up_discontig_bg(fs, type, slotnum);
 }

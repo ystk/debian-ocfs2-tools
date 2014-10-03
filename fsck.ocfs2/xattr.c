@@ -372,23 +372,30 @@ wipe_entry:
 static errcode_t check_xattr_value(o2fsck_state *ost,
 				   struct ocfs2_dinode *di,
 				   struct ocfs2_xattr_header *xh,
+				   uint64_t start,
 				   int *changed)
 {
 	int i;
 	struct extent_info ei = {0, };
 	errcode_t ret = 0;
+	uint64_t owner;
 
+	ei.chk_rec_func = o2fsck_check_extent_rec;
+	ei.mark_rec_alloc_func = o2fsck_mark_tree_clusters_allocated;
+	ei.para = di;
 	for (i = 0 ; i < xh->xh_count; i++) {
 		int change = 0;
 		struct ocfs2_xattr_entry *xe = &xh->xh_entries[i];
 
 		if (!ocfs2_xattr_is_local(xe)) {
+			int offset = xe->xe_name_offset +
+					OCFS2_XATTR_SIZE(xe->xe_name_len);
 			struct ocfs2_xattr_value_root *xv =
 				(struct ocfs2_xattr_value_root *)
-				((void *)xh + xe->xe_name_offset +
-				OCFS2_XATTR_SIZE(xe->xe_name_len));
+				((void *)xh + offset);
 			struct ocfs2_extent_list *el = &xv->xr_list;
-			ret = check_el(ost, &ei, di, el, 1, &change);
+			owner = start + offset / ost->ost_fs->fs_blocksize;
+			ret = check_el(ost, &ei, owner, el, 1, &change);
 			if (ret)
 				return ret;
 			if (change)
@@ -415,7 +422,7 @@ static errcode_t check_xattr(o2fsck_state *ost,
 	if (check_xattr_entry(ost, di, xh, changed, xi))
 		return 0;
 
-	ret = check_xattr_value(ost, di, xh, changed);
+	ret = check_xattr_value(ost, di, xh, xi->blkno, changed);
 	if (ret)
 		return ret;
 
@@ -601,11 +608,29 @@ static errcode_t o2fsck_check_xattr_index_block(o2fsck_state *ost,
 	if (!el->l_next_free_rec)
 		return 0;
 
-	ret = check_el(ost, &ei, di, el,
+	ei.chk_rec_func = o2fsck_check_extent_rec;
+	ei.mark_rec_alloc_func = o2fsck_mark_tree_clusters_allocated;
+	ei.para = di;
+	ret = check_el(ost, &ei, xb->xb_blkno, el,
 		ocfs2_xattr_recs_per_xb(ost->ost_fs->fs_blocksize),
 		changed);
 	if (ret)
 		return ret;
+
+	/*
+	 * We need to write the changed xattr tree first so that the following
+	 * ocfs2_xattr_get_rec can get the updated information.
+	 */
+	if (*changed) {
+		ret = ocfs2_write_xattr_block(ost->ost_fs,
+					      di->i_xattr_loc, (char *)xb);
+		if (ret) {
+			com_err(whoami, ret, "while writing root block of"
+				" extended attributes ");
+			return ret;
+		}
+	}
+
 
 	while (name_hash > 0) {
 		ret = ocfs2_xattr_get_rec(ost->ost_fs, xb, name_hash, &p_blkno,

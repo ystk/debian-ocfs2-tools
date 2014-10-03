@@ -89,5 +89,8 @@
 #include "special.h"
 #include "dir.h"
 #include "journal.h"
+#include "quota.h"
+#include "refcount.h"
+#include "discontig_bg.h"
 
 #endif		/* __MAIN_H__ */

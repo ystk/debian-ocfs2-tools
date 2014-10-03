@@ -112,6 +112,7 @@ static int corrupt_match_dirent(struct dirent_corrupt_struct *dcs,
 }
 
 static int rename_dirent_proc(struct ocfs2_dir_entry *dirent,
+			      uint64_t   blocknr,
 			      int        offset,
 			      int        blocksize,
 			      char       *buf,
@@ -157,6 +158,7 @@ static int rename_dirent(ocfs2_filesys *fs, uint64_t dir,
 }
 
 static int corrupt_dirent_ino_proc(struct ocfs2_dir_entry *dirent,
+				   uint64_t   blocknr,
 				   int        offset,
 				   int        blocksize,
 				   char       *buf,
@@ -200,6 +202,7 @@ static int corrupt_dirent_ino(ocfs2_filesys *fs, uint64_t dir,
 }
 
 static int corrupt_dirent_reclen_proc(struct ocfs2_dir_entry *dirent,
+				      uint64_t   blocknr,
 				      int        offset,
 				      int        blocksize,
 				      char       *buf,
@@ -285,8 +288,16 @@ static void damage_dir_content(ocfs2_filesys *fs, uint64_t dir,
 		corrupt_dirent_reclen(fs, dir, ".", &tmp_no, OCFS2_DIR_PAD);
 		fprintf(stdout, "DIR_DOT_EXCESS: "
 			"Corrupt directory#%"PRIu64","
-			"change dot's dirent length from %lu to %lu\n",
+			"change dot's dirent length from %"PRIu64" "
+			"to %"PRIu64"\n",
 			dir, tmp_no - OCFS2_DIR_PAD, tmp_no);
+		break;
+	case DIR_DOTDOT:
+		corrupt_dirent_ino(fs, dir, "..", &tmp_no, 10);
+		fprintf(stdout, "DIR_DOTDOT: "
+			"Corrupt directory#%"PRIu64
+			", change dotdot inode from %"PRIu64" to %"PRIu64".\n",
+			dir, tmp_no - 10, tmp_no);
 		break;
 	case DIRENT_ZERO:
 		memset(name, 0, 1);
@@ -371,7 +382,8 @@ static void damage_dir_content(ocfs2_filesys *fs, uint64_t dir,
 		corrupt_dirent_reclen(fs, dir, name, &tmp_no, 1);
 		fprintf(stdout, "DIRENT_LENGTH: "
 			"Corrupt directory#%"PRIu64
-			", modify entry#%"PRIu64" from %lu to %lu.\n",
+			", modify entry#%"PRIu64" from %"PRIu64" "
+			"to %"PRIu64".\n",
 			dir, tmp_blkno, tmp_no - 1, tmp_no);
 		break;
 	default:
@@ -382,6 +394,16 @@ static void damage_dir_content(ocfs2_filesys *fs, uint64_t dir,
 }
 
 void mess_up_dir_dot(ocfs2_filesys *fs, enum fsck_type type, uint64_t blkno)
+{
+	uint64_t tmp_blkno;
+
+	create_directory(fs, blkno, &tmp_blkno);
+	damage_dir_content(fs, tmp_blkno, type);
+
+	return;
+}
+
+void mess_up_dir_dotdot(ocfs2_filesys *fs, enum fsck_type type, uint64_t blkno)
 {
 	uint64_t tmp_blkno;
 

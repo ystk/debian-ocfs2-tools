@@ -108,6 +108,9 @@ struct dup_inode {
 
 	/* What we've done to it. */
 	unsigned int	di_state;
+
+	/* the refcount tree it has. */
+	uint64_t	di_refcount_loc;
 };
 
 /*
@@ -121,6 +124,11 @@ struct dup_cluster_owner {
 	 * for the dup inode rbtree.
 	 */
 	uint64_t		dco_ino;
+	/*
+	 * virtual offset in the extent tree.
+	 * Only valid for an extent tree, 0 for a chain file.
+	 */
+	uint32_t		dco_cpos;
 };
 
 struct dup_cluster {
@@ -242,7 +250,7 @@ static void dup_inode_insert(struct dup_context *dct,
  * into the context.
  */
 static errcode_t dup_insert(struct dup_context *dct, uint32_t cluster,
-			    uint64_t ino, uint32_t i_flags)
+			    struct ocfs2_dinode *dinode, uint32_t v_cpos)
 {
 	errcode_t ret;
 	struct list_head *p;
@@ -267,8 +275,9 @@ static errcode_t dup_insert(struct dup_context *dct, uint32_t cluster,
 			"structures");
 		goto out;
 	}
-	new_di->di_ino = ino;
-	new_di->di_flags = i_flags;
+	new_di->di_ino = dinode->i_blkno;
+	new_di->di_flags = dinode->i_flags;
+	new_di->di_refcount_loc = dinode->i_refcount_loc;
 
 	ret = ocfs2_malloc0(sizeof(struct dup_cluster_owner), &new_dco);
 	if (ret) {
@@ -277,7 +286,8 @@ static errcode_t dup_insert(struct dup_context *dct, uint32_t cluster,
 			"structures");
 		goto out;
 	}
-	new_dco->dco_ino = ino;
+	new_dco->dco_ino = dinode->i_blkno;
+	new_dco->dco_cpos = v_cpos;
 
 	dc = dup_cluster_lookup(dct, cluster);
 	if (!dc) {
@@ -286,7 +296,7 @@ static errcode_t dup_insert(struct dup_context *dct, uint32_t cluster,
 		new_dc = NULL;
 	}
 
-	di = dup_inode_lookup(dct, ino);
+	di = dup_inode_lookup(dct, dinode->i_blkno);
 	if (!di) {
 		dup_inode_insert(dct, new_di);
 		di = new_di;
@@ -296,7 +306,7 @@ static errcode_t dup_insert(struct dup_context *dct, uint32_t cluster,
 	dco = NULL;
 	list_for_each(p, &dc->dc_owners) {
 		dco = list_entry(p, struct dup_cluster_owner, dco_list);
-		if (dco->dco_ino == ino)
+		if (dco->dco_ino == dinode->i_blkno)
 			break;
 		dco = NULL;
 	}
@@ -357,10 +367,12 @@ struct process_extents_context {
 	struct ocfs2_dinode *di;
 	errcode_t ret;
 	uint64_t global_bitmap_blkno;
+	char *extra_buf;
 };
 
 static errcode_t process_dup_clusters(struct process_extents_context *pc,
-				      uint32_t p_cpos, uint32_t clusters)
+				      uint32_t p_cpos, uint32_t clusters,
+				      uint32_t v_cpos)
 {
 	int was_set;
 	errcode_t ret = 0;
@@ -380,8 +392,7 @@ static errcode_t process_dup_clusters(struct process_extents_context *pc,
 			verbosef("Marking multiply-claimed cluster %"PRIu32
 				 " as claimed by inode %"PRIu64"\n",
 				 p_cpos, pc->di->i_blkno);
-			ret = dup_insert(pc->dct, p_cpos, pc->di->i_blkno,
-					 pc->di->i_flags);
+			ret = dup_insert(pc->dct, p_cpos, pc->di, v_cpos);
 			if (ret) {
 				com_err(whoami, ret,
 					"while marking duplicate cluster "
@@ -393,6 +404,7 @@ static errcode_t process_dup_clusters(struct process_extents_context *pc,
 		}
 
 		p_cpos++;
+		v_cpos++;
 		clusters--;
 	}
 
@@ -404,14 +416,44 @@ static int process_inode_chains(ocfs2_filesys *fs, uint64_t gd_blkno,
 {
 	struct process_extents_context *pc = priv_data;
 	uint32_t clusters = pc->di->id2.i_chain.cl_cpg;
+	struct ocfs2_group_desc *gd;
+	int i;
 
 	if (pc->di->i_blkno == pc->global_bitmap_blkno)
 		clusters = 1;
 
-	pc->ret = process_dup_clusters(pc,
-				       ocfs2_blocks_to_clusters(fs, gd_blkno),
-				       clusters);
+	if (!ocfs2_supports_discontig_bg(OCFS2_RAW_SB(fs->fs_super)) ||
+	    (pc->di->i_blkno == pc->global_bitmap_blkno)) {
+		pc->ret = process_dup_clusters(pc,
+					ocfs2_blocks_to_clusters(fs, gd_blkno),
+					clusters, 0);
+		goto out;
+	}
 
+	pc->ret = ocfs2_read_group_desc(fs, gd_blkno, pc->extra_buf);
+	if (pc->ret)
+		goto out;
+
+	gd = (struct ocfs2_group_desc *)pc->extra_buf;
+	if (!ocfs2_gd_is_discontig(gd)) {
+		pc->ret = process_dup_clusters(pc,
+					ocfs2_blocks_to_clusters(fs, gd_blkno),
+					clusters, 0);
+		goto out;
+	}
+
+	/* Now check the discontiguous group case. */
+	for (i = 0; i < gd->bg_list.l_next_free_rec; i++) {
+		struct ocfs2_extent_rec *rec = &gd->bg_list.l_recs[i];
+
+		pc->ret = process_dup_clusters(pc,
+				       ocfs2_blocks_to_clusters(fs,
+								rec->e_blkno),
+				       rec->e_leaf_clusters,
+				       rec->e_cpos);
+	}
+
+out:
 	return pc->ret ? OCFS2_CHAIN_ERROR | OCFS2_CHAIN_ABORT : 0;
 }
 
@@ -429,7 +471,8 @@ static int process_inode_extents(ocfs2_filesys *fs,
 	pc->ret = process_dup_clusters(pc,
 				       ocfs2_blocks_to_clusters(fs,
 								rec->e_blkno),
-				       rec->e_leaf_clusters);
+				       rec->e_leaf_clusters,
+				       rec->e_cpos);
 
 	return pc->ret ? OCFS2_EXTENT_ERROR | OCFS2_EXTENT_ABORT : 0;
 }
@@ -534,7 +577,8 @@ static int process_xattr_buckets(ocfs2_filesys *fs,
 	pc->ret = process_dup_clusters(pc,
 				       ocfs2_blocks_to_clusters(fs,
 								rec->e_blkno),
-				       rec->e_leaf_clusters);
+				       rec->e_leaf_clusters,
+				       rec->e_cpos);
 	if (pc->ret)
 		goto out;
 
@@ -629,7 +673,8 @@ out:
 
 static errcode_t pass1b_process_inode(o2fsck_state *ost,
 				      struct dup_context *dct,
-				      uint64_t ino, struct ocfs2_dinode *di)
+				      uint64_t ino, struct ocfs2_dinode *di,
+				      char *extra_buf)
 {
 	errcode_t ret = 0;
 	static uint64_t global_bitmap_blkno = 0;
@@ -637,6 +682,7 @@ static errcode_t pass1b_process_inode(o2fsck_state *ost,
 		.ost = ost,
 		.dct = dct,
 		.di = di,
+		.extra_buf = extra_buf,
 	};
 
 	/*
@@ -700,7 +746,7 @@ static errcode_t o2fsck_pass1b(o2fsck_state *ost, struct dup_context *dct)
 {
 	errcode_t ret;
 	uint64_t blkno;
-	char *buf;
+	char *buf = NULL, *extra_buf = NULL;
 	struct ocfs2_dinode *di;
 	ocfs2_inode_scan *scan;
 	ocfs2_filesys *fs = ost->ost_fs;
@@ -716,12 +762,18 @@ static errcode_t o2fsck_pass1b(o2fsck_state *ost, struct dup_context *dct)
 		goto out;
 	}
 
+	ret = ocfs2_malloc_block(fs->fs_io, &extra_buf);
+	if (ret) {
+		com_err(whoami, ret, "while allocating extra buffer");
+		goto out;
+	}
+
 	di = (struct ocfs2_dinode *)buf;
 
 	ret = ocfs2_open_inode_scan(fs, &scan);
 	if (ret) {
 		com_err(whoami, ret, "while opening inode scan");
-		goto out_free;
+		goto out;
 	}
 
 	/*
@@ -749,17 +801,19 @@ static errcode_t o2fsck_pass1b(o2fsck_state *ost, struct dup_context *dct)
 		if (!(di->i_flags & OCFS2_VALID_FL))
 			continue;
 
-		ret = pass1b_process_inode(ost, dct, blkno, di);
+		ret = pass1b_process_inode(ost, dct, blkno, di, extra_buf);
 		if (ret)
 			break;
 	}
 
 	ocfs2_close_inode_scan(scan);
 
-out_free:
-	ocfs2_free(&buf);
-
 out:
+	if (buf)
+		ocfs2_free(&buf);
+	if (extra_buf)
+		ocfs2_free(&extra_buf);
+
 	return ret;
 }
 
@@ -889,8 +943,8 @@ static void name_inode(struct dir_scan_context *scan,
 		pass1c_warn(OCFS2_ET_NO_MEMORY);
 }
 
-static int walk_iterate(struct ocfs2_dir_entry *de, int offset,
-			int blocksize, char *buf, void *priv_data)
+static int walk_iterate(struct ocfs2_dir_entry *de, uint64_t blocknr,
+			int offset, int blocksize, char *buf, void *priv_data)
 {
 	struct dir_scan_context *scan = priv_data;
 
@@ -971,6 +1025,7 @@ static void print_inode_path(struct dup_inode *di)
 static void for_each_owner(struct dup_context *dct, struct dup_cluster *dc,
 			   int (*func)(struct dup_cluster *dc,
 				       struct dup_inode *di,
+				       struct dup_cluster_owner *dco,
 				       void *priv_data),
 			   void *priv_data)
 {
@@ -983,13 +1038,13 @@ static void for_each_owner(struct dup_context *dct, struct dup_cluster *dc,
 		dco = list_entry(p, struct dup_cluster_owner, dco_list);
 		di = dup_inode_lookup(dct, dco->dco_ino);
 		assert(di);
-		if (func(dc, di, priv_data))
+		if (func(dc, di, dco, priv_data))
 			break;
 	}
 }
 
 static int count_func(struct dup_cluster *dc, struct dup_inode *di,
-		      void *priv_data)
+		      struct dup_cluster_owner *dco, void *priv_data)
 {
 	uint64_t *count = priv_data;
 
@@ -1000,10 +1055,47 @@ static int count_func(struct dup_cluster *dc, struct dup_inode *di,
 }
 
 static int print_func(struct dup_cluster *dc, struct dup_inode *di,
-		      void *priv_data)
+		      struct dup_cluster_owner *dco, void *priv_data)
 {
 	printf("  ");
 	print_inode_path(di);
+
+	return 0;
+}
+
+/*
+ * Check whether we can create refcount for the file.
+ * So a file is valid only if:
+ * 1. It isn't a system file.
+ * 2. It has no refcount tree.
+ * 3. It has the same tree as others.
+ * Store refcount_loc if we find one.
+ *
+ * if there is other file that does't have the same tree, set refcount_loc
+ * to UINT64_MAX and stop the search.
+ */
+static int find_refcount_func(struct dup_cluster *dc, struct dup_inode *di,
+			      struct dup_cluster_owner *dco, void *priv_data)
+{
+	uint64_t *refcount_loc = priv_data;
+
+	if (di->di_flags & OCFS2_SYSTEM_FL) {
+		*refcount_loc = UINT64_MAX;
+		return 1;
+	}
+
+	if (!di->di_refcount_loc)
+		return 0;
+
+	if (!*refcount_loc) {
+		*refcount_loc = di->di_refcount_loc;
+		return 0;
+	}
+
+	if (di->di_refcount_loc != *refcount_loc) {
+		*refcount_loc = UINT64_MAX;
+		return 1;
+	}
 
 	return 0;
 }
@@ -1090,7 +1182,7 @@ static errcode_t copy_clone(ocfs2_filesys *fs, ocfs2_cached_inode *orig_ci,
 	uint64_t offset = 0;
 	uint64_t filesize = orig_ci->ci_inode->i_size;
 	unsigned int iosize = 1024 * 1024;  /* Let's read in 1MB hunks */
-	unsigned int got, wrote;
+	unsigned int got, wrote, write_len;
 
 	ret = ocfs2_malloc_blocks(fs->fs_io, iosize / fs->fs_blocksize,
 				  &buf);
@@ -1100,15 +1192,15 @@ static errcode_t copy_clone(ocfs2_filesys *fs, ocfs2_cached_inode *orig_ci,
 	}
 
 	while (offset < filesize) {
-		if ((filesize - offset) < iosize)
-			iosize = filesize - offset;
 		ret = ocfs2_file_read(orig_ci, buf, iosize, offset, &got);
 		if (ret) {
 			com_err(whoami, ret, "while reading inode to clone");
 			break;
 		}
 
-		ret = ocfs2_file_write(clone_ci, buf, iosize, offset, &wrote);
+		write_len = ocfs2_align_bytes_to_blocks(fs, got);
+		ret = ocfs2_file_write(clone_ci, buf, write_len,
+				       offset, &wrote);
 		if (ret) {
 			com_err(whoami, ret, "while writing clone data");
 			break;
@@ -1124,6 +1216,7 @@ static errcode_t copy_clone(ocfs2_filesys *fs, ocfs2_cached_inode *orig_ci,
 static errcode_t swap_clone(ocfs2_filesys *fs, ocfs2_cached_inode *orig_ci,
 			    ocfs2_cached_inode *clone_ci)
 {
+	uint32_t clusters;
 	errcode_t ret;
 	struct ocfs2_extent_list *tmp_el = NULL;
 	struct ocfs2_extent_list *orig_el = &orig_ci->ci_inode->id2.i_list;
@@ -1142,6 +1235,14 @@ static errcode_t swap_clone(ocfs2_filesys *fs, ocfs2_cached_inode *orig_ci,
 	memcpy(tmp_el, orig_el, el_size);
 	memcpy(orig_el, clone_el, el_size);
 	memcpy(clone_el, tmp_el, el_size);
+
+	/*
+	 * In new_clone, we allocate all the clusters disregard whether
+	 * there are holes. So here we need to update the i_clusters also.
+	 */
+	clusters = orig_ci->ci_inode->i_clusters;
+	orig_ci->ci_inode->i_clusters = clone_ci->ci_inode->i_clusters;
+	clone_ci->ci_inode->i_clusters = clusters;
 
 	/*
 	 * We write the cloned inode with the original extent list first.
@@ -1301,7 +1402,7 @@ out:
 }
 
 static int fix_dups_func(struct dup_cluster *dc, struct dup_inode *di,
-			 void *priv_data)
+			 struct dup_cluster_owner *dco, void *priv_data)
 {
 	int ret = 0;
 	struct fix_dup_context *fd = priv_data;
@@ -1348,12 +1449,92 @@ static int fix_dups_func(struct dup_cluster *dc, struct dup_inode *di,
 	return ret;
 }
 
+struct create_refcount {
+	o2fsck_state *cr_ost;
+	uint64_t cr_refcount_loc;
+	errcode_t cr_err;
+};
+
+static int create_refcount_func(struct dup_cluster *dc, struct dup_inode *di,
+				struct dup_cluster_owner *dco, void *priv_data)
+{
+	errcode_t ret;
+	struct create_refcount *cr = priv_data;
+	ocfs2_filesys *fs = cr->cr_ost->ost_fs;
+
+	if (!di->di_refcount_loc) {
+		ret = ocfs2_attach_refcount_tree(fs, di->di_ino,
+						 cr->cr_refcount_loc);
+		if (ret) {
+			com_err(whoami, ret,
+				"while attaching file %"PRIu64" to"
+				"refcount tree %"PRIu64, di->di_ino,
+				cr->cr_refcount_loc);
+			goto out;
+		}
+		di->di_refcount_loc = cr->cr_refcount_loc;
+	}
+
+	ret = ocfs2_change_refcount_flag(fs, di->di_ino,
+					 dco->dco_cpos, 1, dc->dc_cluster,
+					 OCFS2_EXT_REFCOUNTED, 0);
+	if (ret) {
+		com_err(whoami, ret,
+			"while mark extent refcounted at %u in file %"PRIu64,
+			dco->dco_cpos, di->di_ino);
+		goto out;
+	}
+
+	ret = ocfs2_increase_refcount(fs, di->di_ino, dc->dc_cluster, 1);
+	if (ret)
+		com_err(whoami, ret,
+			"while increasing refcount at %u for file %"PRIu64,
+			dc->dc_cluster, di->di_ino);
+
+out:
+	cr->cr_err = ret;
+	return ret;
+}
+/*
+ * Create refcount record for all the files sharing the same clusters.
+ * Create a new refcount tree if all the files don't have it(refcount_loc = 0).
+ * If a file don't have refcount tree, attach it to that tree.
+ */
+static errcode_t o2fsck_create_refcount(o2fsck_state *ost,
+					struct dup_context *dct,
+					struct dup_cluster *dc,
+					uint64_t refcount_loc)
+{
+	errcode_t ret = 0;
+	struct create_refcount cr = {
+		.cr_ost = ost,
+		.cr_refcount_loc = refcount_loc,
+	};
+
+	if (!refcount_loc) {
+		ret = ocfs2_create_refcount_tree(ost->ost_fs,
+						 &refcount_loc);
+		if (ret) {
+			com_err(whoami, ret,
+				"while allocating a new refcount block");
+			goto out;
+		}
+		cr.cr_refcount_loc = refcount_loc;
+	}
+
+	for_each_owner(dct, dc, create_refcount_func, &cr);
+
+	ret = cr.cr_err;
+out:
+	return ret;
+}
+
 static errcode_t o2fsck_pass1d(o2fsck_state *ost, struct dup_context *dct)
 {
 	errcode_t ret = 0;
 	struct dup_cluster *dc;
 	struct rb_node *node = rb_first(&dct->dup_clusters);
-	uint64_t dups;
+	uint64_t dups, refcount_loc;
 	struct fix_dup_context fd = {
 		.fd_ost = ost,
 		.fd_dct = dct,
@@ -1373,6 +1554,23 @@ static errcode_t o2fsck_pass1d(o2fsck_state *ost, struct dup_context *dct)
 		       "inodes:\n",
 		       dc->dc_cluster);
 		for_each_owner(dct, dc, print_func, NULL);
+
+		/* We try create refcount tree first. */
+		if (ocfs2_refcount_tree(OCFS2_RAW_SB(ost->ost_fs->fs_super))) {
+			refcount_loc = 0;
+			for_each_owner(dct, dc, find_refcount_func,
+				       &refcount_loc);
+			if (refcount_loc != UINT64_MAX &&
+			    prompt(ost, PY, PR_DUP_CLUSTERS_ADD_REFCOUNT,
+				   "Create refcount record for it?")) {
+				ret = o2fsck_create_refcount(ost, dct, dc,
+							     refcount_loc);
+				if (ret)
+					break;
+				continue;
+			}
+		}
+
 		for_each_owner(dct, dc, fix_dups_func, &fd);
 		if (fd.fd_err) {
 			ret = fd.fd_err;

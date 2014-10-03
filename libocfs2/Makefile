@@ -73,16 +73,21 @@ CFILES = 		\
 	lockid.c	\
 	backup_super.c	\
 	feature_string.c\
+	quota.c		\
 	image.c		\
-	xattr.c
+	xattr.c		\
+	extent_tree.c	\
+	refcount.c	\
+	dir_indexed.c
 
 HFILES =		\
 	bitmap.h	\
-	blockcheck.h	\
 	crc32table.h	\
 	dir_iterate.h	\
 	dir_util.h	\
-	extent_map.h
+	extent_map.h	\
+	extent_tree.h	\
+	refcount.h
 
 HFILES_GEN = ocfs2_err.h
 

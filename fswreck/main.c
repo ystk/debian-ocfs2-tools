@@ -9,12 +9,12 @@
  * modify it under the terms of the GNU General Public
  * License as published by the Free Software Foundation; either
  * version 2 of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public
  * License along with this program; if not, write to the
  * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
@@ -62,6 +62,9 @@ static struct prompt_code prompt_codes[NUM_FSCK_TYPE] = {
 	define_prompt_code(EXTENT_MARKED_UNWRITTEN, corrupt_file,
 			   "Mark an extent unwritten when the filesystem "
 			   "does not support it"),
+	define_prompt_code(EXTENT_MARKED_REFCOUNTED, corrupt_file,
+			   "Mark an extent refcounted when the filesystem "
+			   "does not support it"),
 	define_prompt_code(EXTENT_BLKNO_UNALIGNED, corrupt_file,
 			   "Corrupt extent record's e_blkno"),
 	define_prompt_code(EXTENT_CLUSTERS_OVERRUN, corrupt_file,
@@ -94,10 +97,8 @@ static struct prompt_code prompt_codes[NUM_FSCK_TYPE] = {
 			   "Corrupt sparse inode's i_clusters field"),
 	define_prompt_code(INODE_COUNT, corrupt_file,
 			   "Corrupt inode's i_links_count field"),
-	define_prompt_code(INODE_LINK_NOT_CONNECTED, corrupt_file,
-			   "Create an inode which has no links"),
-	define_prompt_code(INODE_NOT_CONNECTED, NULL,
-			   "Unimplemented corrupt code"),
+	define_prompt_code(INODE_NOT_CONNECTED, corrupt_file,
+			   "Create an inode which has no links to dentries"),
 	define_prompt_code(LINK_FAST_DATA, corrupt_file,
 			   "Corrupt symlink's i_clusters to 0"),
 	define_prompt_code(LINK_NULLTERM, corrupt_file,
@@ -112,8 +113,8 @@ static struct prompt_code prompt_codes[NUM_FSCK_TYPE] = {
 			   "Corrupt root inode, change its i_mode to 0"),
 	define_prompt_code(LOSTFOUND_MISSING, corrupt_file,
 			   "Corrupt root inode, change its i_mode to 0"),
-	define_prompt_code(DIR_DOTDOT, NULL,
-			   "Unimplemented corrupt code"),
+	define_prompt_code(DIR_DOTDOT, corrupt_file,
+			   "Corrupt dir's dotdot entry's ino it points to"),
 	define_prompt_code(DIR_ZERO, corrupt_file,
 			   "Corrupt directory, empty its content"),
 	define_prompt_code(DIRENT_DOTTY_DUP, corrupt_file,
@@ -168,8 +169,8 @@ static struct prompt_code prompt_codes[NUM_FSCK_TYPE] = {
 			   "Corrupt chain list's header blkno"),
 	define_prompt_code(CHAIN_BITS, corrupt_sys_file,
 			   "Corrupt chain's total bits"),
-	define_prompt_code(CLUSTER_ALLOC_BIT, NULL,
-			   "Unimplemented corrupt code"),
+	define_prompt_code(CLUSTER_ALLOC_BIT, corrupt_group_desc,
+			   "Mark bits of global bitmap by unused clusters"),
 	define_prompt_code(CHAIN_I_CLUSTERS, corrupt_sys_file,
 			   "Corrupt chain allocator's i_clusters"),
 	define_prompt_code(CHAIN_I_SIZE, corrupt_sys_file,
@@ -249,6 +250,72 @@ static struct prompt_code prompt_codes[NUM_FSCK_TYPE] = {
 			   "Corrupt journal file by missing features."),
 	define_prompt_code(JOURNAL_TOO_SMALL, corrupt_sys_file,
 			   "Corrupt journal file as a too small one."),
+	define_prompt_code(QMAGIC_INVALID, corrupt_sys_file,
+			   "Corrupt quota system file's header."),
+	define_prompt_code(QTREE_BLK_INVALID, corrupt_sys_file,
+			   "Corrupt quota tree block."),
+	define_prompt_code(DQBLK_INVALID, corrupt_sys_file,
+			   "Corrupt quota data blok."),
+	define_prompt_code(DUP_DQBLK_INVALID, corrupt_sys_file,
+			   "Duplicate a invalid quota limits."),
+	define_prompt_code(DUP_DQBLK_VALID, corrupt_sys_file,
+			   "Duplicate a valid quota limits."),
+	define_prompt_code(REFCOUNT_FLAG_INVALID, corrupt_file,
+			   "Create a refcounted inode on a unsupported volume"),
+	define_prompt_code(REFCOUNT_LOC_INVALID, corrupt_file,
+			   "Corrupt a refcounted file's refcount location"),
+	define_prompt_code(RB_BLKNO, corrupt_refcount,
+			   "Corrupt a refcount block's rf_blkno"),
+	define_prompt_code(RB_GEN, corrupt_refcount,
+			   "Corrupt a refcount block's generation"),
+	define_prompt_code(RB_GEN_FIX, corrupt_refcount,
+			   "Corrupt a refcount block's generation"),
+	define_prompt_code(RB_PARENT, corrupt_refcount,
+			   "Corrupt a refcount block's rf_parent"),
+	define_prompt_code(REFCOUNT_BLOCK_INVALID, corrupt_refcount,
+			   "Corrupt a refcount block's rf_parent"),
+	define_prompt_code(REFCOUNT_ROOT_BLOCK_INVALID, corrupt_refcount,
+			   "Corrupt a refcount block's rf_parent"),
+	define_prompt_code(REFCOUNT_LIST_COUNT, corrupt_refcount,
+			   "corrupt the refcount list in a refcount block"),
+	define_prompt_code(REFCOUNT_LIST_USED, corrupt_refcount,
+			   "corrupt the refcount list in a refcount block"),
+	define_prompt_code(REFCOUNT_CLUSTER_RANGE, corrupt_refcount,
+			   "corrupt the refcount list in a refcount block"),
+	define_prompt_code(REFCOUNT_CLUSTER_COLLISION, corrupt_refcount,
+			   "corrupt the refcount list in a refcount block"),
+	define_prompt_code(REFCOUNT_LIST_EMPTY, corrupt_refcount,
+			   "corrupt the refcount list in a refcount block"),
+	define_prompt_code(REFCOUNT_CLUSTERS, corrupt_refcount,
+			   "corrupt the rf_clusters for a refcount tree"),
+	define_prompt_code(REFCOUNT_COUNT, corrupt_refcount,
+			   "corrupt the rf_count for a refcount tree"),
+	define_prompt_code(REFCOUNT_REC_REDUNDANT, corrupt_refcount,
+			   "corrupt the refcount record in a refcount block"),
+	define_prompt_code(REFCOUNT_COUNT_INVALID, corrupt_refcount,
+			   "corrupt the refcount record in a refcount block"),
+	define_prompt_code(DUP_CLUSTERS_ADD_REFCOUNT, corrupt_refcount,
+			   "corrupt refcount record and handle them in dup"),
+	define_prompt_code(DISCONTIG_BG_DEPTH, corrupt_discontig_bg,
+			   "corrupt extent tree depth for a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_COUNT, corrupt_discontig_bg,
+			   "corrupt extent list count for a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_REC_RANGE, corrupt_discontig_bg,
+			   "corrupt extent rec range for a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_CORRUPT_LEAVES, corrupt_discontig_bg,
+			   "corrupt extent recs' clusters for a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_CLUSTERS, corrupt_discontig_bg,
+			   "corrupt a discontig bg by more clusters allocated"),
+	define_prompt_code(DISCONTIG_BG_LESS_CLUSTERS, corrupt_discontig_bg,
+			   "corrupt a discontig bg by less clusters allocated"),
+	define_prompt_code(DISCONTIG_BG_NEXT_FREE_REC, corrupt_discontig_bg,
+			   "corrupt extent list's next free of a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_LIST_CORRUPT, corrupt_discontig_bg,
+			   "corrupt extent list and rec for  a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_REC_CORRUPT, corrupt_discontig_bg,
+			   "corrupt extent rec for a discontig bg"),
+	define_prompt_code(DISCONTIG_BG_LEAF_CLUSTERS, corrupt_discontig_bg,
+			   "corrupt extent rec's clusters for a discontig bg"),
 };
 
 #undef define_prompt_code
@@ -316,7 +383,7 @@ static int parse_corrupt_codes(const char *corrupt_codes)
 	char *p;
 	char *token = NULL;
 
-	p = corrupt_codes;
+	p = (char *)corrupt_codes;
 
 	while (p) {
 
@@ -373,7 +440,7 @@ static int read_options(int argc, char **argv)
 		return 1;
 	}
 
-	while(1) {
+	while (1) {
 		c = getopt(argc, argv, "c:n:");
 		if (c == -1)
 			break;

@@ -48,7 +48,7 @@ char *program_name = NULL;
 
 static void usage(void)
 {
-	fprintf(stderr, ("Usage: %s [-rI] device image_file\n"),
+	fprintf(stderr, ("Usage: %s [-frI] device image_file\n"),
 		program_name);
 	exit(1);
 }
@@ -62,7 +62,7 @@ static errcode_t mark_localalloc_bits(ocfs2_filesys *ofs,
 
 static errcode_t traverse_group_desc(ocfs2_filesys *ofs,
 				     struct ocfs2_group_desc *grp,
-				     int dump_type)
+				     int dump_type, int bpc)
 {
 	errcode_t ret = 0;
 	uint64_t blkno;
@@ -70,11 +70,12 @@ static errcode_t traverse_group_desc(ocfs2_filesys *ofs,
 
 	blkno = grp->bg_blkno;
 	for (i = 1; i < grp->bg_bits; i++) {
+		blkno = ocfs2_get_block_from_group(ofs, grp, bpc, i);
 		if ((dump_type == OCFS2_IMAGE_READ_INODE_YES) &&
 		    ocfs2_test_bit(i, grp->bg_bitmap))
-			ret = traverse_inode(ofs, (blkno + i));
+			ret = traverse_inode(ofs, blkno);
 		else
-			ocfs2_image_mark_bitmap(ofs, blkno + i);
+			ocfs2_image_mark_bitmap(ofs, blkno);
 	}
 	return ret;
 }
@@ -155,7 +156,8 @@ static errcode_t traverse_chains(ocfs2_filesys *ofs,
 
 			grp = (struct ocfs2_group_desc *)buf;
 			if (dump_type) {
-				ret = traverse_group_desc(ofs, grp, dump_type);
+				ret = traverse_group_desc(ofs, grp,
+						dump_type, cl->cl_bpc);
 				if (ret)
 					goto out;
 			}
@@ -168,6 +170,62 @@ out:
 		ocfs2_free(&buf);
 	return ret;
 }
+
+static errcode_t traverse_dx_root(ocfs2_filesys *ofs, uint64_t blkno)
+{
+	errcode_t ret;
+	char *buf = NULL;
+	struct ocfs2_dx_root_block *dx_root;
+
+	ocfs2_image_mark_bitmap(ofs, blkno);
+
+	ret = ocfs2_malloc_block(ofs->fs_io, &buf);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_read_dx_root(ofs, blkno, buf);
+	if (ret)
+		goto out;
+
+	dx_root = (struct ocfs2_dx_root_block *) buf;
+	if (!(dx_root->dr_flags & OCFS2_DX_FLAG_INLINE))
+		traverse_extents(ofs, &dx_root->dr_list);
+
+out:
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}
+
+static errcode_t traverse_xb(ocfs2_filesys *ofs, uint64_t blkno)
+{
+	errcode_t ret = 0;
+	char *buf = NULL;
+	struct ocfs2_xattr_block *xb;
+
+	ret = ocfs2_malloc_block(ofs->fs_io, &buf);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_read_xattr_block(ofs, blkno, buf);
+	if (ret)
+		goto out;
+
+	xb = (struct ocfs2_xattr_block *)buf;
+
+	if (xb->xb_flags & OCFS2_XATTR_INDEXED)
+		traverse_extents(ofs, &(xb->xb_attrs.xb_root.xt_list));
+	else
+		/* Direct xattr block should be handled by
+		 * extent_alloc scans */
+		goto out;
+out:
+	if (buf)
+		ocfs2_free(&buf);
+
+	return ret;
+}
+
 
 static errcode_t traverse_inode(ocfs2_filesys *ofs, uint64_t inode)
 {
@@ -199,8 +257,11 @@ static errcode_t traverse_inode(ocfs2_filesys *ofs, uint64_t inode)
 	/*
 	 * Do not scan inode if it's regular file. Extent blocks of regular
 	 * files get backedup when scanning extent_alloc system files
+	 *
+	 * NOTE: we do need to handle its xattr btree if exists.
 	 */
-	if (!S_ISDIR(di->i_mode) && !(di->i_flags & OCFS2_SYSTEM_FL))
+	if (!S_ISDIR(di->i_mode) && !(di->i_flags & OCFS2_SYSTEM_FL) &&
+	    !(di->i_dyn_features & OCFS2_HAS_XATTR_FL))
 		goto out;
 
 	/* Read and traverse group descriptors */
@@ -234,10 +295,33 @@ static errcode_t traverse_inode(ocfs2_filesys *ofs, uint64_t inode)
 		ret = traverse_chains(ofs, &(di->id2.i_chain), dump_type);
 	else if (di->i_flags & OCFS2_DEALLOC_FL)
 		ret = mark_dealloc_bits(ofs, &(di->id2.i_dealloc));
-	else
+	else if ((di->i_dyn_features & OCFS2_HAS_XATTR_FL) && di->i_xattr_loc)
+		/* Do need to traverse xattr btree to map bucket leaves */
+		ret = traverse_xb(ofs, di->i_xattr_loc);
+	else {
+		/*
+		 * Don't check superblock flag for the dir indexing
+		 * feature in case it (or the directory) is corrupted
+		 * we want to try to pick up as much of the supposed
+		 * index as possible.
+		 *
+		 * Error reporting is a bit different though. If the
+		 * directory indexing feature is set on the super
+		 * block, we should fail here to indicate an
+		 * incomplete inode. Otherwise it is safe to ignore
+		 * errors from traverse_dx_root.
+		 */
+		if (S_ISDIR(di->i_mode) &&
+		    (di->i_dyn_features & OCFS2_INDEXED_DIR_FL)) {
+			ret = traverse_dx_root(ofs, di->i_dx_root);
+			if (ret && ocfs2_supports_indexed_dirs(super))
+			    goto out_error;
+		}
 		/* traverse extents for system files */
 		ret = traverse_extents(ofs, &(di->id2.i_list));
+	}
 
+out_error:
 	if (ret) {
 		com_err(program_name, ret, "while scanning inode %"PRIu64"",
 			inode);
@@ -323,10 +407,98 @@ out:
 	return ret;
 }
 
+/*
+ * This write function takes a file descriptor and pretends to be
+ * pwrite64().  If the descriptor is seekable, it will just call
+ * pwrite64().  Otherwise it will send zeros down to fill any holes.  The
+ * caller can't go backwards in the file, because seeking may not be
+ * possible.
+ *
+ * It returns -1 if it fails to finish up at offset+count.  It will
+ * print its error, so the caller does not need to.
+ */
+#define ZERO_BUF_SIZE  (1<<20)
+static ssize_t raw_write(ocfs2_filesys *fs, int fd, const void *buf,
+			 size_t count, loff_t offset)
+{
+	errcode_t ret;
+	ssize_t written;
+	static char *zero_buf = NULL;
+	static int can_seek = -1;
+	static loff_t fpos = 0;
+	loff_t to_write;
+
+	if (can_seek == -1) {
+		/* Test if we can seek/pwrite */
+		fpos = lseek64(fd, 0, SEEK_CUR);
+		if (fpos < 0) {
+			fpos = 0;
+			can_seek = 0;
+		} else
+			can_seek = 1;
+	}
+
+	if (!can_seek && !zero_buf) {
+		ret = ocfs2_malloc_blocks(fs->fs_io,
+					  ZERO_BUF_SIZE / fs->fs_blocksize,
+					  &zero_buf);
+		if (ret) {
+			com_err(program_name, ret,
+				"while allocating zero buffer");
+			written = -1;
+			goto out;
+		}
+		memset(zero_buf, 0, ZERO_BUF_SIZE);
+	}
+
+	if (can_seek) {
+		written = pwrite64(fd, buf, count, offset);
+		goto out;
+	}
+
+	/* Ok, let's fake pwrite64() for the caller */
+	if (fpos > offset) {
+		com_err(program_name, OCFS2_ET_INTERNAL_FAILURE,
+			": file position went backwards while writing "
+			"image file");
+		written = -1;
+		goto out;
+	}
+
+	while (fpos < offset) {
+		to_write = ocfs2_min((loff_t)ZERO_BUF_SIZE, offset - fpos);
+		written = write(fd, zero_buf, to_write);
+		if (written < 0) {
+			com_err(program_name, OCFS2_ET_IO,
+				"while writing zero blocks: %s",
+				strerror(errno));
+			goto out;
+		}
+		fpos += written;
+	}
+
+	to_write = count;
+	while (to_write) {
+		written = write(fd, buf, to_write);
+		if (written < 0) {
+			com_err(program_name, OCFS2_ET_IO,
+				"while writing data blocks: %s",
+				strerror(errno));
+			goto out;
+		}
+		fpos += written;
+		to_write -= written;
+	}
+	/* Ok, we did it */
+	written = count;
+
+out:
+	return written;
+}
+
 static errcode_t write_raw_image_file(ocfs2_filesys *ofs, int fd)
 {
 	struct ocfs2_super_block *super;
-	char *zero_buf = NULL;
 	char *blk_buf = NULL;
 	uint64_t blk = -1;
 	ssize_t count;
@@ -335,47 +507,32 @@ static errcode_t write_raw_image_file(ocfs2_filesys *ofs, int fd)
 	super = OCFS2_RAW_SB(ofs->fs_super);
 	ret = ocfs2_malloc_block(ofs->fs_io, &blk_buf);
 	if (ret) {
-		com_err(program_name, ret, "error while allocating buffer ");
+		com_err(program_name, ret, "while allocating I/O buffer");
 		goto out;
 	}
-
-	ret = ocfs2_malloc_block(ofs->fs_io, &zero_buf);
-	if (ret) {
-		com_err(program_name, ret, "error while allocating buffer ");
-		goto out;
-	}
-	memset(zero_buf, 0, ofs->fs_blocksize);
 
 	while (++blk < ofs->fs_blocks) {
 		if (ocfs2_image_test_bit(ofs, blk)) {
 			ret = ocfs2_read_blocks(ofs, blk, 1, blk_buf);
 			if (ret) {
-				com_err(program_name, ret, "error occurred "
-					"during read cluster %"PRIu64"", blk);
-				goto out;
+				com_err(program_name, ret,
+					"while reading block %"PRIu64, blk);
+				break;
 			}
 
-			if (fd == 1)
-				count = write(fd, blk_buf, ofs->fs_blocksize);
-			else
-				count = pwrite64(fd, blk_buf, ofs->fs_blocksize,
-					(__off64_t)(blk * ofs->fs_blocksize));
-		} else if (fd == 1) {
-			count = write(fd, zero_buf, ofs->fs_blocksize);
-		} else
-			continue;
-
-		if ((count == -1) || (count < ofs->fs_blocksize)) {
-			com_err(program_name, errno, "error writing "
-				"blk %"PRIu64"", blk);
-			goto out;
+			count = raw_write(ofs, fd, blk_buf,
+					  ofs->fs_blocksize,
+					  (loff_t)(blk * ofs->fs_blocksize));
+			if (count < 0) {
+				ret = OCFS2_ET_IO;
+				break;
+			}
 		}
 	}
+
 out:
 	if (blk_buf)
 		ocfs2_free(&blk_buf);
-	if (zero_buf)
-		ocfs2_free(&zero_buf);
 	return ret;
 }
 
@@ -538,7 +695,8 @@ int main(int argc, char **argv)
 	int open_flags		= 0;
 	int raw_flag      	= 0;
 	int install_flag  	= 0;
-	int fd            	= 0;
+	int interactive		= 0;
+	int fd            	= STDOUT_FILENO;
 	int c;
 
 	if (argc && *argv)
@@ -547,13 +705,16 @@ int main(int argc, char **argv)
 	initialize_ocfs_error_table();
 
 	optind = 0;
-	while((c = getopt(argc, argv, "rI")) != EOF) {
+	while((c = getopt(argc, argv, "irI")) != EOF) {
 		switch (c) {
 		case 'r':
 			raw_flag++;
 			break;
 		case 'I':
 			install_flag++;
+			break;
+		case 'i':
+			interactive = 1;
 			break;
 		default:
 			usage();
@@ -593,7 +754,9 @@ int main(int argc, char **argv)
 	 * open routine allocates ocfs2_image_state and loads the bitmap if
 	 * OCFS2_FLAG_IMAGE_FILE flag is passed in
 	 */
-	ret = ocfs2_open(src_file, OCFS2_FLAG_RO|open_flags, 0, 0, &ofs);
+	ret = ocfs2_open(src_file,
+			 OCFS2_FLAG_RO|OCFS2_FLAG_NO_ECC_CHECKS|open_flags, 0,
+			 0, &ofs);
 	if (ret) {
 		com_err(program_name, ret, "while trying to open \"%s\"",
 			src_file);
@@ -628,11 +791,11 @@ int main(int argc, char **argv)
 	}
 
 	if (strcmp(dest_file, "-") == 0)
-		fd = 1;
+		fd = STDOUT_FILENO;
 	else {
 		/* prompt user for image creation */
-		if (!install_flag && !prompt_image_creation(ofs, raw_flag,
-					dest_file))
+		if (interactive && !install_flag &&
+		    !prompt_image_creation(ofs, raw_flag, dest_file))
 			goto out;
 		fd = open64(dest_file, O_CREAT|O_TRUNC|O_WRONLY, 0600);
 		if (fd < 0) {
@@ -666,7 +829,7 @@ out:
 		com_err(program_name, ret, "while closing file \"%s\"",
 			src_file);
 
-	if (fd && (fd != 1))
+	if (fd && (fd != STDOUT_FILENO))
 		close(fd);
 
 	return ret;

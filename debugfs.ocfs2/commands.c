@@ -76,6 +76,11 @@ static void do_controld(char **args);
 static void do_dirblocks(char **args);
 static void do_xattr(char **args);
 static void do_frag(char **args);
+static void do_refcount(char **args);
+static void do_dx_root(char **args);
+static void do_dx_leaf(char **args);
+static void do_dx_dump(char **args);
+static void do_dx_space(char **args);
 
 dbgfs_gbls gbls;
 
@@ -114,6 +119,11 @@ static Command commands[] = {
 	{ "decode",	do_decode_lockres },
 	{ "dirblocks",	do_dirblocks },
 	{ "frag",	do_frag },
+	{ "refcount",	do_refcount },
+	{ "dx_root",	do_dx_root },
+	{ "dx_leaf",	do_dx_leaf },
+	{ "dx_dump",	do_dx_dump },
+	{ "dx_space",	do_dx_space },
 };
 
 /*
@@ -643,7 +653,7 @@ static void do_open (char **args)
 	}
 
 	flags = gbls.allow_write ? OCFS2_FLAG_RW : OCFS2_FLAG_RO;
-        flags |= OCFS2_FLAG_HEARTBEAT_DEV_OK;
+        flags |= OCFS2_FLAG_HEARTBEAT_DEV_OK|OCFS2_FLAG_NO_ECC_CHECKS;
 	if (gbls.imagefile)
 		flags |= OCFS2_FLAG_IMAGE_FILE;
 
@@ -840,9 +850,14 @@ static void do_help (char **args)
 	printf ("dlm_locks [-f <file>] [-l] lockname\t\t\tShow live dlm locking state\n");
 	printf ("dump [-p] <filespec> <outfile>\t\tDumps file to outfile on a mounted fs\n");
 	printf ("dirblocks <filespec>\t\t\tDump directory blocks\n");
+	printf ("dx_space <filespec>\t\t\tDump directory free space list\n");
+	printf ("dx_dump <blkno>\t\t\tShow directory index information\n");
+	printf ("dx_leaf <blkno>\t\t\tShow directory index leaf block only\n");
+	printf ("dx_root <blkno>\t\t\tShow directory index root block only\n");
 	printf ("encode <filespec>\t\t\tShow lock name\n");
 	printf ("extent <block#>\t\t\t\tShow extent block\n");
 	printf ("findpath <block#>\t\t\tList one pathname of the inode/lockname\n");
+	printf ("frag <filespec>\t\t\tShow inode extents / clusters ratio\n");
 	printf ("fs_locks [-f <file>] [-l] [-B]\t\t\tShow live fs locking state\n");
 	printf ("group <block#>\t\t\t\tShow chain group\n");
 	printf ("hb\t\t\t\t\tShows the used heartbeat blocks\n");
@@ -856,11 +871,12 @@ static void do_help (char **args)
 	printf ("open <device> [-i] [-s backup#]\t\tOpen a device\n");
 	printf ("quit, q\t\t\t\t\tExit the program\n");
 	printf ("rdump [-v] <filespec> <outdir>\t\tRecursively dumps from src to a dir on a mounted filesystem\n");
+	printf ("refcount [-e] <filespec>\t\t\tDump the refcount tree "
+		"for the specified inode or refcount block\n");
 	printf ("slotmap\t\t\t\t\tShow slot map\n");
-	printf ("stat <filespec>\t\t\t\tShow inode\n");
+	printf ("stat [-t|-T] <filespec>\t\t\t\tShow inode\n");
 	printf ("stats [-h]\t\t\t\tShow superblock\n");
 	printf ("xattr [-v] <filespec>\t\t\tShow Extended Attributes\n");
-	printf ("frag <filespec>\t\t\tShow inode extents / clusters ratio\n");
 }
 
 /*
@@ -1025,9 +1041,31 @@ static void do_stat (char **args)
 	char *buf = NULL;
 	FILE *out;
 	errcode_t ret = 0;
+	const char *stat_usage = "usage: stat [-t|-T] <filespec>";
+	int index = 1, traverse = 1;
 
-	if (process_inode_args(args, &blkno))
+	if (check_device_open())
+		return;
+
+	if (!args[index]) {
+		fprintf(stderr, "%s\n", stat_usage);
 		return ;
+	}
+
+	if (!strncmp(args[index], "-t", 2)) {
+		traverse = 1;
+		index++;
+	} else if (!strncmp(args[index], "-T", 2)) {
+		traverse = 0;
+		index++;
+	}
+
+	ret = string_to_inode(gbls.fs, gbls.root_blkno, gbls.cwd_blkno,
+			      args[index], &blkno);
+	if (ret) {
+		com_err(args[0], ret, "'%s'", args[index]);
+		return ;
+	}
 
 	buf = gbls.blockbuf;
 	ret = ocfs2_read_inode(gbls.fs, blkno, buf);
@@ -1041,20 +1079,26 @@ static void do_stat (char **args)
 	out = open_pager(gbls.interactive);
 	dump_inode(out, inode);
 
-	if ((inode->i_flags & OCFS2_LOCAL_ALLOC_FL))
-		dump_local_alloc(out, &(inode->id2.i_lab));
-	else if ((inode->i_flags & OCFS2_CHAIN_FL))
-		ret = traverse_chains(gbls.fs, &(inode->id2.i_chain), out);
-	else if (S_ISLNK(inode->i_mode) && !inode->i_clusters)
-		dump_fast_symlink(out, (char *)inode->id2.i_symlink);
-	else if (inode->i_flags & OCFS2_DEALLOC_FL)
-		dump_truncate_log(out, &(inode->id2.i_dealloc));
-	else if (!(inode->i_dyn_features & OCFS2_INLINE_DATA_FL))
-		ret = traverse_extents(gbls.fs, &(inode->id2.i_list), out);
+	if (traverse) {
+		if ((inode->i_flags & OCFS2_LOCAL_ALLOC_FL))
+			dump_local_alloc(out, &(inode->id2.i_lab));
+		else if ((inode->i_flags & OCFS2_CHAIN_FL))
+			ret = traverse_chains(gbls.fs,
+					      &(inode->id2.i_chain), out);
+		else if (S_ISLNK(inode->i_mode) && !inode->i_clusters)
+			dump_fast_symlink(out,
+					  (char *)inode->id2.i_symlink);
+		else if (inode->i_flags & OCFS2_DEALLOC_FL)
+			dump_truncate_log(out, &(inode->id2.i_dealloc));
+		else if (!(inode->i_dyn_features & OCFS2_INLINE_DATA_FL))
+			ret = traverse_extents(gbls.fs,
+					       &(inode->id2.i_list), out);
 
-	if (ret)
-		com_err(args[0], ret, "while traversing inode at block "
-			"%"PRIu64, blkno);
+		if (ret)
+			com_err(args[0], ret,
+				"while traversing inode at block "
+				"%"PRIu64, blkno);
+	}
 
 	close_pager(out);
 
@@ -1309,6 +1353,167 @@ static void do_dirblocks (char **args)
 	close_pager(ctxt.out);
 
 	ocfs2_free(&ctxt.buf);
+}
+
+/*
+ * do_dx_root()
+ *
+ */
+static void do_dx_root (char **args)
+{
+	struct ocfs2_dx_root_block *dx_root;
+	uint64_t blkno;
+	char *buf = NULL;
+	FILE *out;
+	errcode_t ret = 0;
+
+	if (process_inodestr_args(args, 1, &blkno) != 1)
+		return;
+
+	buf = gbls.blockbuf;
+	out = open_pager(gbls.interactive);
+
+	ret = ocfs2_read_dx_root(gbls.fs, blkno, buf);
+	if (ret) {
+		com_err(args[0], ret, "while reading dx dir root "
+			"block %"PRIu64"", blkno);
+		close_pager (out);
+		return;
+	}
+
+	dx_root = (struct ocfs2_dx_root_block *)buf;
+	dump_dx_root(out, dx_root);
+	if (!(dx_root->dr_flags & OCFS2_DX_FLAG_INLINE))
+		traverse_extents(gbls.fs, &dx_root->dr_list, out);
+	close_pager(out);
+
+	return;
+}
+
+/*
+ * do_dx_leaf()
+ *
+ */
+static void do_dx_leaf (char **args)
+{
+	struct ocfs2_dx_leaf *dx_leaf;
+	uint64_t blkno;
+	char *buf = NULL;
+	FILE *out;
+	errcode_t ret = 0;
+
+	if (process_inodestr_args(args, 1, &blkno) != 1)
+		return;
+
+	buf = gbls.blockbuf;
+	out = open_pager(gbls.interactive);
+
+	ret = ocfs2_read_dx_leaf(gbls.fs, blkno, buf);
+	if (ret) {
+		com_err(args[0], ret, "while reading dx dir leaf "
+			"block %"PRIu64"", blkno);
+		close_pager (out);
+		return;
+	}
+
+	dx_leaf = (struct ocfs2_dx_leaf *)buf;
+	dump_dx_leaf(out, dx_leaf);
+
+	close_pager(out);
+
+	return;
+}
+
+/*
+ * do_dx_dump()
+ *
+ */
+static void do_dx_dump (char **args)
+{
+	struct ocfs2_dinode *inode;
+	uint64_t ino_blkno;
+	char *buf = NULL;
+	FILE *out;
+	errcode_t ret = 0;
+
+	if (process_inode_args(args, &ino_blkno))
+		return;
+
+	out = open_pager(gbls.interactive);
+
+	buf = gbls.blockbuf;
+	ret = ocfs2_read_inode(gbls.fs, ino_blkno, buf);
+	if (ret) {
+		com_err(args[0], ret, "while reading inode %"PRIu64"",
+			ino_blkno);
+		close_pager (out);
+		return ;
+	}
+
+	inode = (struct ocfs2_dinode *)buf;
+
+	dump_dx_entries(out, inode);
+
+	close_pager(out);
+
+	return;
+}
+
+/*
+ * do_dx_space()
+ *
+ */
+static void do_dx_space (char **args)
+{
+	struct ocfs2_dinode *inode;
+	struct ocfs2_dx_root_block *dx_root;
+	uint64_t ino_blkno, dx_blkno;
+	char *buf = NULL, *dx_root_buf = NULL;
+	FILE *out;
+	errcode_t ret = 0;
+
+	if (process_inode_args(args, &ino_blkno))
+		return;
+
+	out = open_pager(gbls.interactive);
+
+	buf = gbls.blockbuf;
+	ret = ocfs2_read_inode(gbls.fs, ino_blkno, buf);
+	if (ret) {
+		com_err(args[0], ret, "while reading inode %"PRIu64"",
+			ino_blkno);
+		goto out;
+	}
+
+	inode = (struct ocfs2_dinode *)buf;
+	if (!(ocfs2_dir_indexed(inode))) {
+		fprintf(out, "Inode %"PRIu64" is not indexed\n", ino_blkno);
+		goto out;
+	}
+
+	ret = ocfs2_malloc_block(gbls.fs->fs_io, &dx_root_buf);
+	if (ret) {
+		goto out;
+	}
+
+	dx_blkno = (uint64_t) inode->i_dx_root;
+
+	ret = ocfs2_read_dx_root(gbls.fs, dx_blkno, dx_root_buf);
+	if (ret) {
+		com_err(args[0], ret, "while reading dx dir root "
+			"block %"PRIu64"", dx_blkno);
+		goto out;
+	}
+
+	dx_root = (struct ocfs2_dx_root_block *)dx_root_buf;
+
+	dump_dx_space(out, inode, dx_root);
+out:
+	close_pager(out);
+	if (dx_root_buf)
+		ocfs2_free(&dx_root_buf);
+
+	return;
 }
 
 /*
@@ -1749,6 +1954,9 @@ static void do_icheck(char **args)
 	int i;
 	FILE *out;
 
+	if (check_device_open())
+		return;
+
 	if (!args[1]) {
 		fprintf(stderr, "%s\n", testb_usage);
 		return;
@@ -1775,6 +1983,7 @@ static void do_icheck(char **args)
 
 	return;
 }
+
 /*
  * do_xattr()
  *
@@ -1823,7 +2032,7 @@ static void do_xattr(char **args)
 	}
 
 	inode = (struct ocfs2_dinode *)buf;
-	if (!inode->i_dyn_features & OCFS2_HAS_XATTR_FL)
+	if (!(inode->i_dyn_features & OCFS2_HAS_XATTR_FL))
 		return;
 
 	out = open_pager(gbls.interactive);
@@ -1938,4 +2147,141 @@ static void do_frag(char **args)
 	close_pager(out);
 
 	return ;
+}
+
+static void walk_refcount_block(FILE *out, struct ocfs2_refcount_block *rb,
+				int extent_tree)
+{
+	errcode_t ret = 0;
+	uint32_t phys_cpos = UINT32_MAX;
+	uint32_t e_cpos = 0, num_clusters = 0;
+	uint64_t p_blkno = 0;
+	char *buf = NULL;
+	struct ocfs2_refcount_block *leaf_rb;
+
+	if (!(rb->rf_flags & OCFS2_REFCOUNT_TREE_FL)) {
+		dump_refcount_records(out, rb);
+		return;
+	}
+
+	if (extent_tree) {
+		fprintf(out,
+			"\tExtent tree in refcount block %"PRIu64"\n"
+			"\tDepth: %d  Records: %d\n",
+			(uint64_t)rb->rf_blkno,
+			rb->rf_list.l_tree_depth,
+			rb->rf_list.l_next_free_rec);
+		ret = traverse_extents(gbls.fs, &rb->rf_list, out);
+		if (ret)
+			com_err("refcount", ret,
+				"while traversing the extent tree "
+				"of refcount block %"PRIu64,
+				rb->rf_blkno);
+	}
+
+	ret = ocfs2_malloc_block(gbls.fs->fs_io, &buf);
+	if (ret) {
+		com_err("refcount", ret, "while allocating a buffer");
+		return;
+	}
+
+	while (phys_cpos > 0) {
+		ret = ocfs2_refcount_tree_get_rec(gbls.fs, rb, phys_cpos,
+						  &p_blkno, &e_cpos,
+						  &num_clusters);
+		if (ret) {
+			com_err("refcount", ret,
+				"while looking up next refcount leaf in "
+				"recount block %"PRIu64"\n",
+				rb->rf_blkno);
+			break;
+		}
+
+		ret = ocfs2_read_refcount_block(gbls.fs, p_blkno, buf);
+		if (ret) {
+			com_err("refcount", ret, "while reading refcount block"
+				" %"PRIu64, p_blkno);
+			break;
+		}
+
+		leaf_rb = (struct ocfs2_refcount_block *)buf;
+		dump_refcount_block(out, leaf_rb);
+		walk_refcount_block(out, leaf_rb, extent_tree);
+
+		if (e_cpos == 0)
+			break;
+
+		phys_cpos = e_cpos - 1;
+	}
+
+	ocfs2_free(&buf);
+}
+
+/* do_refcount() can take an inode or a refcount block address. */
+static void do_refcount(char **args)
+{
+	struct ocfs2_dinode *di;
+	struct ocfs2_refcount_block *rb;
+	uint64_t blkno;
+	char *buf = NULL;
+	FILE *out;
+	errcode_t ret = 0;
+	int extent_tree = 0;
+	char *inode_args[3] = {
+		args[0],
+		args[1],
+		NULL,
+	};
+
+	if (args[1] && !strcmp(args[1], "-e")) {
+		extent_tree = 1;
+		inode_args[1] = args[2];
+	}
+
+	if (!inode_args[1]) {
+		fprintf(stderr, "usage: %s [-e] <filespec>\n", args[0]);
+		return;
+	}
+
+	if (process_inode_args(inode_args, &blkno))
+		return ;
+
+	buf = gbls.blockbuf;
+	ret = ocfs2_read_inode(gbls.fs, blkno, buf);
+	if (!ret) {
+		di = (struct ocfs2_dinode *)buf;
+		if (!(di->i_dyn_features & OCFS2_HAS_REFCOUNT_FL)) {
+			fprintf(stderr,
+				"%s: Inode %"PRIu64" does not have a "
+				"refcount tree\n",
+				args[0], blkno);
+			return;
+		}
+
+		blkno = di->i_refcount_loc;
+	} else if ((ret != OCFS2_ET_IO) && (ret != OCFS2_ET_BAD_INODE_MAGIC)) {
+		/*
+		 * If the user passed a refcount block address,
+		 * read_inode() will return ET_IO or ET_BAD_INODE_MAGIC.
+		 * For those cases we proceed treating blkno as a
+		 * refcount block.  All other errors are real errors.
+		 */
+		com_err(args[0], ret, "while reading inode %"PRIu64"", blkno);
+		return;
+	}
+
+	ret = ocfs2_read_refcount_block(gbls.fs, blkno, buf);
+	if (ret) {
+		com_err(args[0], ret, "while reading refcount block %"PRIu64,
+			blkno);
+		return;
+	}
+
+	out = open_pager(gbls.interactive);
+
+	rb = (struct ocfs2_refcount_block *)buf;
+	dump_refcount_block(out, rb);
+	walk_refcount_block(out, rb, extent_tree);
+
+	close_pager(out);
 }
