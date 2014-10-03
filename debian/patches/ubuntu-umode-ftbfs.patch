@@ -1,0 +1,23 @@
+Description: Fix undefined umode type in 3.3 kernels
+ 3.3 kernel headers define umode_t type within a __KERNEL__
+ preprocessor ifdef region. Because of this, the type is not
+ usable by non-kernel code. This patch fixes this by not using
+ the type. More info at:
+ http://lists.busybox.net/pipermail/buildroot/2012-March/052192.html
+ http://git.kernel.org/?p=linux/kernel/git/stable/linux-stable.git;a=commitdiff;h=0583fcc96bb117763c0fa74c123573c0112dec65
+Forwarded: no
+AUthor: Andres Rodriguez <andreserl@ubuntu.com>
+
+Index: ocfs2-tools-1.6.4/include/ocfs2-kernel/ocfs2_fs.h
+===================================================================
+--- ocfs2-tools-1.6.4.orig/include/ocfs2-kernel/ocfs2_fs.h	2012-05-23 13:29:49.000000000 -0400
++++ ocfs2-tools-1.6.4/include/ocfs2-kernel/ocfs2_fs.h	2012-05-23 13:53:46.208530251 -0400
+@@ -1638,7 +1638,7 @@
+ }
+ 
+ static inline void ocfs2_set_de_type(struct ocfs2_dir_entry *de,
+-				    umode_t mode)
++				    unsigned short mode)
+ {
+ 	de->file_type = ocfs2_type_by_mode[(mode & S_IFMT)>>S_SHIFT];
+ }

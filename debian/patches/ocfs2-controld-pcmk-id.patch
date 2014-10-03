@@ -1,0 +1,15 @@
+Index: ocfs2-tools-1.6.3/ocfs2_controld/ocfs2_controld.h
+===================================================================
+--- ocfs2-tools-1.6.3.orig/ocfs2_controld/ocfs2_controld.h 2011-08-19 12:00:15.152454931 -0400
++++ ocfs2-tools-1.6.3/ocfs2_controld/ocfs2_controld.h  2011-08-19 12:00:38.632489358 -0400
+@@ -22,6 +22,10 @@
+  *  of the GNU General Public License v.2.
+  */
+ 
++#ifndef PCMK_SERVICE_ID
++#define PCMK_SERVICE_ID 9
++#endif
++
+ #ifndef __OCFS2_CONTROLD_H
+ #define __OCFS2_CONTROLD_H
+

@@ -1,0 +1,11 @@
+libo2dlm-dlopen-libdlm_lt.patch
+ocfs2-controld-includes.patch
+ocfs2-init-script.patch
+o2cb-init-script.patch
+shorten-manpage-lines.patch
+ld-no-add-needed.diff
+ld-as-needed.diff
+ocfs2-controld-pcmk-id.patch
+format-security.patch
+ocfs2-controld-headers.patch
+ubuntu-umode-ftbfs.patch

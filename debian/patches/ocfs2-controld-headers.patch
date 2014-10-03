@@ -1,0 +1,12 @@
+diff -urN ocfs2-tools-1.6.4.orig/ocfs2_controld/pacemaker.c ocfs2-tools-1.6.4/ocfs2_controld/pacemaker.c
+--- ocfs2-tools-1.6.4.orig/ocfs2_controld/pacemaker.c	2009-05-06 03:36:57.000000000 +0200
++++ ocfs2-tools-1.6.4/ocfs2_controld/pacemaker.c	2012-04-18 08:58:28.000000000 +0200
+@@ -30,7 +30,7 @@
+ #include <pacemaker/crm/crm.h>
+ #include <pacemaker/crm/ais.h>
+ #include <pacemaker/crm/common/cluster.h>
+-#include <pacemaker/crm/common/stack.h>
++#include <pacemaker/crm/cluster/stack.h>
+ 
+ #include "ocfs2-kernel/kernel-list.h"
+ #include "o2cb/o2cb.h"

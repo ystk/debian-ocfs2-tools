@@ -1,0 +1,12 @@
+diff -urN ocfs2-tools-1.4.4.orig/libo2dlm/o2dlm.c ocfs2-tools-1.4.4/libo2dlm/o2dlm.c
+--- ocfs2-tools-1.4.4.orig/libo2dlm/o2dlm.c	2009-04-14 00:10:40.000000000 +0200
++++ ocfs2-tools-1.4.4/libo2dlm/o2dlm.c	2010-06-28 09:24:34.000000000 +0200
+@@ -713,7 +713,7 @@
+ 		goto out;
+ 	}
+ 
+-	ctxt->ct_lib_handle = dlopen("libdlm_lt.so",
++	ctxt->ct_lib_handle = dlopen("libdlm_lt.so.3",
+ 				     RTLD_NOW | RTLD_LOCAL);
+ 	if (!ctxt->ct_lib_handle)
+ 		goto out;

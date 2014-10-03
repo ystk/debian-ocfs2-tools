@@ -1,0 +1,12 @@
+diff -urN ocfs2-tools-1.4.4.orig/ocfs2_controld/Makefile ocfs2-tools-1.4.4/ocfs2_controld/Makefile
+--- ocfs2-tools-1.4.4.orig/ocfs2_controld/Makefile	2009-04-14 00:10:40.000000000 +0200
++++ ocfs2-tools-1.4.4/ocfs2_controld/Makefile	2010-06-22 17:49:42.000000000 +0200
+@@ -14,7 +14,7 @@
+ ifneq ($(BUILD_PCMK_SUPPORT),)
+ SBIN_PROGRAMS += ocfs2_controld.pcmk
+ # Some pacemaker headers which pacemaker.c includes want this.
+-PCMK_INCLUDES = -I/usr/include/pacemaker -I/usr/include/heartbeat/ $(GLIB_CFLAGS)
++PCMK_INCLUDES = -I/usr/include/pacemaker -I/usr/include/heartbeat/ -I/usr/include/libxml2 $(GLIB_CFLAGS)
+ endif
+ 
+ INCLUDES = -I$(TOPDIR)/include -I. $(PCMK_INCLUDES)

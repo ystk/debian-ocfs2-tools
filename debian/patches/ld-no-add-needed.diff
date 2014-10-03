@@ -1,0 +1,13 @@
+Index: ocfs2-tools-1.6.3/ocfs2_controld/Makefile
+===================================================================
+--- ocfs2-tools-1.6.3.orig/ocfs2_controld/Makefile	2011-01-13 12:29:31.000000000 -0600
++++ ocfs2-tools-1.6.3/ocfs2_controld/Makefile	2011-01-13 12:29:56.000000000 -0600
+@@ -67,7 +67,7 @@
+ ocfs2_controld.pcmk: $(PCMK_DAEMON_OBJS) $(LIBO2CB_DEPS)
+ 	$(LINK) $(GLIB_LIBS) $(LIBO2CB_LIBS) $(COM_ERR_LIBS) \
+ 		$(OPENAIS_LIBS) $(COROSYNC_LIBS) \
+-		$(DLMCONTROL_LIBS) -lcrmcluster -lstonithd
++		$(DLMCONTROL_LIBS) -lcrmcluster -lcrmcommon -lstonithd
+ 
+ ocfs2_controld.cman: $(CMAN_DAEMON_OBJS) $(LIBO2CB_DEPS)
+ 	$(LINK) $(LIBO2CB_LIBS) $(COM_ERR_LIBS) $(OPENAIS_LIBS) \

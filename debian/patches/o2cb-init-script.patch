@@ -1,0 +1,15 @@
+diff -urN ocfs2-tools-1.4.4.orig//vendor/common/o2cb.init.sh ocfs2-tools-1.4.4/vendor/common/o2cb.init.sh
+--- ocfs2-tools-1.4.4.orig//vendor/common/o2cb.init.sh	2010-02-19 18:19:50.000000000 +0100
++++ ocfs2-tools-1.4.4/vendor/common/o2cb.init.sh	2010-06-24 11:24:38.000000000 +0200
+@@ -8,9 +8,9 @@
+ # Required-Start: $network
+ # Should-Start:
+-# Required-Stop:
+-# Default-Start: 2 3 5
+-# Default-Stop:
++# Required-Stop: $network
++# Default-Start: S
++# Default-Stop: 0 6
+ # Short-Description: Load O2CB cluster services at system boot.
+ # Description: Load O2CB cluster services at system boot.
+ ### END INIT INFO
