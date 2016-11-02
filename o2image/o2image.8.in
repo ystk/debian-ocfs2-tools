@@ -1,13 +1,13 @@
-.TH "o2image" "8" "April 2009" "Version @VERSION@" "OCFS2 Manual Pages"
+.TH "o2image" "8" "January 2012" "Version @VERSION@" "OCFS2 Manual Pages"
 .SH "NAME"
 o2image \- Copy or restore \fIOCFS2\fR file system meta-data
 .SH "SYNOPSIS"
 \fBo2image\fR [\fB\-r\fR] [\fB\-I\fR] \fIdevice\fR \fIimage-file\fR
 .SH "DESCRIPTION"
 .PP
-\fBo2image\fR copies the \fIOCFS2\fR file system meta-data from the device to the specified image-file.
-This image file contains the file system skeleton that includes the inodes, directory names
-and file names. It does \fBnot\fR include any file data.
+\fBo2image\fR copies the \fIOCFS2\fR file system meta-data from the device to the
+specified image-file. This image file contains the file system skeleton that includes
+the inodes, directory names and file names. It does \fBnot\fR include any file data.
 
 This image file can be useful to debug certain problems that are not reproducible otherwise.
 Like on-disk corruptions. It could also be used to analyse the file system layout in an aging
@@ -37,24 +37,44 @@ and let the tool create the image-file in the packed format.
 Restores meta-data from the image-file onto the device. \fBCAUTION: This option could
 corrupt the file system.\fR
 
+.TP
+\fB\-i\fR
+Interactive mode - before writing out the image file print it's size and ask whether
+to proceed. This setting only applies when '-I' is not specified. It can be useful
+when the file system holding the image is low on disk space and the user might need
+to free up space once the target image size is calculated.
+
 .SH "EXAMPLES"
+Copies metadata blocks from /dev/sda1 device to sda1.out file.
 
-.TS
-;
-L.
-[root@node1 ~]# o2image /dev/sda1 sda1.out
-Copies metadata blocks from /dev/sda1 device to sda1.out file
+.nf
+.ft 6
+# o2image /dev/sda1 sda1.out
+.ft
+.fi
 
-[root@node1 ~] o2image -I /dev/sda1 sda1.out
-\fBUse with CAUTION\fR. Copies meta-data blocks from sda1.out onto the /dev/sda1 device.
-.TE
+Copies meta-data blocks from sda1.out onto the /dev/sda1 device. \fBAs this command
+over-writes an existing volume, please use with CAUTION\fR.
+
+.nf
+.ft 6
+# o2image -I /dev/sda1 sda1.out
+.ft
+.fi
 
 .SH "SEE ALSO"
 .BR debugfs.ocfs2(8)
 .BR fsck.ocfs2(8)
+.BR fsck.ocfs2.checks(8)
+.BR mkfs.ocfs2(8)
+.BR mount.ocfs2(8)
+.BR mounted.ocfs2(8)
+.BR o2cluster(8)
+.BR o2info(1)
+.BR tunefs.ocfs2(8)
 
 .SH "AUTHORS"
 Oracle Corporation
 
 .SH "COPYRIGHT"
-Copyright \(co 2007, 2009 Oracle. All rights reserved.
+Copyright \(co 2007, 2012 Oracle. All rights reserved.

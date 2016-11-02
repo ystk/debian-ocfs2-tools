@@ -34,8 +34,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <ctype.h>
 
 #include <linux/types.h>
 
@@ -46,9 +48,64 @@
 #include <o2cb/o2cb_err.h>
 #include <o2cb/ocfs2_nodemanager.h>
 #include <o2cb/ocfs2_heartbeat.h>
+#include <ocfs2-kernel/ocfs2_fs.h>
 
+#define OCFS2_FS_NAME			"ocfs2"
 
-#define OCFS2_FS_NAME		"ocfs2"
+/* Classic (historically speaking) cluster stack */
+#define OCFS2_CLASSIC_CLUSTER_STACK	"o2cb"
+
+#define OCFS2_PCMK_CLUSTER_STACK	"pcmk"
+#define OCFS2_CMAN_CLUSTER_STACK	"cman"
+
+static inline int o2cb_valid_stack_name(char *name)
+{
+	return !strcmp(name, OCFS2_CLASSIC_CLUSTER_STACK) ||
+		!strcmp(name, OCFS2_PCMK_CLUSTER_STACK) ||
+		!strcmp(name, OCFS2_CMAN_CLUSTER_STACK);
+}
+
+static inline int o2cb_valid_cluster_name(char *name)
+{
+	unsigned len;
+
+	if (!name)
+		return 0;
+
+	len = strlen(name);
+	if (len == 0 || len > OCFS2_CLUSTER_NAME_LEN)
+		return 0;
+
+	return 1;
+}
+
+static inline int o2cb_valid_o2cb_cluster_name(char *name)
+{
+	int len;
+
+	if (!name)
+		return 0;
+
+	len = strlen(name);
+	if (!len)
+		return 0;
+
+	while(isalnum(*name++) && len--);
+
+	if (len)
+		return 0;
+
+	return 1;
+}
+
+#define O2CB_GLOBAL_HEARTBEAT_TAG	"global"
+#define O2CB_LOCAL_HEARTBEAT_TAG	"local"
+
+static inline int o2cb_valid_heartbeat_mode(char *mode)
+{
+	return !strcmp(mode, O2CB_GLOBAL_HEARTBEAT_TAG) ||
+		!strcmp(mode, O2CB_LOCAL_HEARTBEAT_TAG);
+}
 
 errcode_t o2cb_init(void);
 
@@ -68,6 +125,12 @@ void o2cb_free_cluster_list(char **clusters);
 errcode_t o2cb_list_nodes(char *cluster_name, char ***nodes);
 void o2cb_free_nodes_list(char **nodes);
 
+errcode_t o2cb_list_hb_regions(char *cluster_name, char ***regions);
+void o2cb_free_hb_regions_list(char **regions);
+
+errcode_t o2cb_global_heartbeat_mode(char *cluster_name, int *global);
+errcode_t o2cb_set_heartbeat_mode(char *cluster_name, char *mode);
+
 errcode_t o2cb_control_daemon_debug(char **debug);
 
 struct o2cb_cluster_desc {
@@ -75,6 +138,7 @@ struct o2cb_cluster_desc {
 	char *c_cluster;	/* The name of the cluster, NULL for the
 				   default cluster, which is only valid in
 				   the classic stack.  */
+	uint8_t c_flags;
 };
 
 struct o2cb_region_desc {
@@ -92,6 +156,12 @@ struct o2cb_region_desc {
  * begin_group_join().  Regular programs (not mount.ocfs2) should provide
  * a mountpoint that does not begin with a '/'.  Eg, fsck could use "fsck"
  */
+errcode_t o2cb_start_heartbeat(struct o2cb_cluster_desc *cluster,
+			       struct o2cb_region_desc *region);
+
+errcode_t o2cb_stop_heartbeat(struct o2cb_cluster_desc *cluster,
+			      struct o2cb_region_desc *region);
+
 errcode_t o2cb_begin_group_join(struct o2cb_cluster_desc *cluster,
 				struct o2cb_region_desc *region);
 errcode_t o2cb_complete_group_join(struct o2cb_cluster_desc *cluster,
@@ -114,6 +184,16 @@ errcode_t o2cb_num_region_refs(const char *region_name,
 errcode_t o2cb_get_node_num(const char *cluster_name,
 			    const char *node_name,
 			    uint16_t *node_num);
+errcode_t o2cb_get_node_port(const char *cluster_name,
+			     const char *node_name,
+			     uint32_t *ip_port);
+errcode_t o2cb_get_node_ip_string(const char *cluster_name,
+				  const char *node_name,
+				  char *ip_address, int count);
+errcode_t o2cb_get_node_local(const char *cluster_name,
+			      const char *node_name,
+			      uint32_t *local);
+
 void o2cb_free_cluster_desc(struct o2cb_cluster_desc *cluster);
 errcode_t o2cb_running_cluster_desc(struct o2cb_cluster_desc *cluster);
 
@@ -128,5 +208,6 @@ void o2cb_control_close(void);
 errcode_t o2cb_control_node_down(const char *uuid, unsigned int nodeid);
 
 errcode_t o2cb_get_hb_ctl_path(char *buf, int count);
+errcode_t o2cb_setup_stack(char *stack_name);
 
 #endif  /* _O2CB_H */

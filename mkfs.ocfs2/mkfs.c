@@ -5,7 +5,7 @@
  *
  * OCFS2 format utility
  *
- * Copyright (C) 2004 Oracle.  All rights reserved.
+ * Copyright (C) 2004, 2011 Oracle.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -15,11 +15,6 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  *
  */
 
@@ -70,7 +65,6 @@ static void format_leading_space(State *s);
 static void open_device(State *s);
 static void close_device(State *s);
 static int initial_slots_for_volume(uint64_t size);
-static void generate_uuid(State *s);
 static void create_generation(State *s);
 static void init_record(State *s, SystemFileDiskRecord *rec, int type, int mode);
 static void print_state(State *s);
@@ -82,6 +76,7 @@ static AllocGroup * initialize_alloc_group(State *s, const char *name,
 					   uint64_t blkno,
 					   uint16_t chain, uint16_t cpg,
 					   uint16_t bpc);
+static void index_system_dirs(State *s, ocfs2_filesys *fs);
 static void create_lost_found_dir(State *s, ocfs2_filesys *fs);
 static void format_journals(State *s, ocfs2_filesys *fs);
 static void format_slotmap(State *s, ocfs2_filesys *fs);
@@ -98,23 +93,28 @@ static SystemFileInfo system_files[] = {
 	{ "slot_map", SFI_OTHER, 1, S_IFREG | 0644 },
 	{ "heartbeat", SFI_HEARTBEAT, 1, S_IFREG | 0644 },
 	{ "global_bitmap", SFI_CLUSTER, 1, S_IFREG | 0644 },
+	{ "aquota.user", SFI_QUOTA, 1, S_IFREG | 0644 },
+	{ "aquota.group", SFI_QUOTA, 1, S_IFREG | 0644 },
 	{ "orphan_dir:%04d", SFI_OTHER, 0, S_IFDIR | 0755 },
 	{ "extent_alloc:%04d", SFI_CHAIN, 0, S_IFREG | 0644 },
 	{ "inode_alloc:%04d", SFI_CHAIN, 0, S_IFREG | 0644 },
 	{ "journal:%04d", SFI_JOURNAL, 0, S_IFREG | 0644 },
 	{ "local_alloc:%04d", SFI_LOCAL_ALLOC, 0, S_IFREG | 0644 },
-	{ "truncate_log:%04d", SFI_TRUNCATE_LOG, 0, S_IFREG | 0644 }
+	{ "truncate_log:%04d", SFI_TRUNCATE_LOG, 0, S_IFREG | 0644 },
+	{ "aquota.user:%04d", SFI_QUOTA, 0, S_IFREG | 0644 },
+	{ "aquota.group:%04d", SFI_QUOTA, 0, S_IFREG | 0644 },
 };
 
 struct fs_type_translation {
 	const char *ft_str;
-	enum ocfs2_fs_types ft_type;
+	enum ocfs2_mkfs_types ft_type;
 };
 
-static struct fs_type_translation ocfs2_fs_types_table[] = {
-	{"datafiles", FS_DATAFILES},
-	{"mail", FS_MAIL},
-	{NULL, FS_DEFAULT},
+static struct fs_type_translation ocfs2_mkfs_types_table[] = {
+	{"datafiles", OCFS2_MKFSTYPE_DATAFILES},
+	{"mail", OCFS2_MKFSTYPE_MAIL},
+	{"vmstore", OCFS2_MKFSTYPE_VMSTORE},
+	{NULL, OCFS2_MKFSTYPE_DEFAULT},
 };
 
 enum {
@@ -123,6 +123,7 @@ enum {
 	FEATURES_OPTION,
 	CLUSTER_STACK_OPTION,
 	CLUSTER_NAME_OPTION,
+	GLOBAL_HEARTBEAT_OPTION,
 };
 
 static uint64_t align_bytes_to_clusters_ceil(State *s,
@@ -137,6 +138,87 @@ static uint64_t align_bytes_to_clusters_ceil(State *s,
 	ret = ret << s->cluster_size_bits;
 
 	return ret;
+}
+
+/*
+ *	Translate 32 bytes uuid to 36 bytes uuid format.
+ *	for example:
+ *	32 bytes uuid: 178BDC83D50241EF94EB474A677D498B
+ *	36 bytes uuid: 178BDC83-D502-41EF-94EB-474A677D498B
+ */
+static void translate_uuid(char *uuid_32, char *uuid_36)
+{
+	int i;
+	char *cp = uuid_32;
+
+	for (i = 0; i < 36; i++) {
+		if ((i == 8) || (i == 13) || (i == 18) || (i == 23)) {
+			uuid_36[i] = '-';
+			continue;
+		}
+		uuid_36[i] = *cp++;
+	}
+}
+
+static int is_cluster_info_valid(State *s, char *stack_name,
+				 char *cluster_name, int globalhb)
+{
+	if (!stack_name && !cluster_name && !globalhb)
+		return 1;
+
+	if (s->mount == MOUNT_LOCAL) {
+		if (stack_name || cluster_name || globalhb) {
+			com_err(s->progname, O2CB_ET_INVALID_STACK_NAME,
+				"; local mount is incompatible with "
+				"the specified cluster attribute");
+			return 0;
+		}
+		return 1;
+	}
+
+	if (!stack_name || !strlen(stack_name)) {
+		com_err(s->progname, O2CB_ET_INVALID_STACK_NAME,
+			"; missing cluster stack");
+		return 0;
+	}
+
+	if (!o2cb_valid_stack_name(stack_name)) {
+		com_err(s->progname, O2CB_ET_INVALID_STACK_NAME,
+			"; unknown cluster stack '%s'", stack_name);
+		return 0;
+	}
+
+	if (!cluster_name) {
+		com_err(s->progname, O2CB_ET_INVALID_CLUSTER_NAME,
+			"; missing cluster name");
+		return 0;
+	}
+
+	if (!strcmp(stack_name, OCFS2_CLASSIC_CLUSTER_STACK)) {
+		if (!o2cb_valid_o2cb_cluster_name(cluster_name)) {
+			com_err(s->progname, O2CB_ET_INVALID_CLUSTER_NAME,
+				"; max %d alpha-numeric characters",
+				OCFS2_CLUSTER_NAME_LEN);
+			return 0;
+		}
+	} else {
+		if (!o2cb_valid_cluster_name(cluster_name)) {
+			com_err(s->progname, O2CB_ET_INVALID_CLUSTER_NAME,
+				"; max %d characters", OCFS2_CLUSTER_NAME_LEN);
+			return 0;
+		}
+	}
+
+	if (globalhb) {
+		if (strcmp(stack_name, OCFS2_CLASSIC_CLUSTER_STACK)) {
+			com_err(s->progname, O2CB_ET_INVALID_STACK_NAME,
+				"; global heartbeat mode is only applicable to "
+				"the o2cb cluster stack");
+			return 0;
+		}
+	}
+
+	return 1;
 }
 
 static void
@@ -226,11 +308,136 @@ static void mkfs_init_dir_trailer(State *s, DirData *dir, void *buf)
 	}
 }
 
+/* Should we skip this inode because of features enabled / disabled? */
+static int feature_skip(State *s, int system_inode)
+{
+	switch (system_inode) {
+		case USER_QUOTA_SYSTEM_INODE:
+		case LOCAL_USER_QUOTA_SYSTEM_INODE:
+			return !(s->feature_flags.opt_ro_compat &
+					OCFS2_FEATURE_RO_COMPAT_USRQUOTA);
+		case GROUP_QUOTA_SYSTEM_INODE:
+		case LOCAL_GROUP_QUOTA_SYSTEM_INODE:
+			return !(s->feature_flags.opt_ro_compat &
+					OCFS2_FEATURE_RO_COMPAT_GRPQUOTA);
+		default:
+			return 0;
+	}
+}
+
 static inline uint32_t system_dir_bytes_needed(State *s)
 {
 	int each = OCFS2_DIR_REC_LEN(SYSTEM_FILE_NAME_MAX);
 
 	return each * sys_blocks_needed(s->initial_slots);
+}
+
+static void format_quota_files(State *s, ocfs2_filesys *fs)
+{
+	errcode_t ret;
+	ocfs2_quota_hash *usr_hash = NULL, *grp_hash = NULL;
+
+	/* Write correct data into quota files */
+	if (!feature_skip(s, USER_QUOTA_SYSTEM_INODE)) {
+		ret = ocfs2_init_fs_quota_info(fs, USRQUOTA);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while looking up global user quota file");
+			goto error;
+		}
+		fs->qinfo[USRQUOTA].flags = 0;
+		fs->qinfo[USRQUOTA].qi_info.dqi_syncms = OCFS2_DEF_QUOTA_SYNC;
+		fs->qinfo[USRQUOTA].qi_info.dqi_bgrace = OCFS2_DEF_BLOCK_GRACE;
+		fs->qinfo[USRQUOTA].qi_info.dqi_igrace = OCFS2_DEF_INODE_GRACE;
+
+		ret = ocfs2_new_quota_hash(&usr_hash);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while creating user quota hash.");
+			goto error;
+		}
+		ret = ocfs2_init_global_quota_file(fs, USRQUOTA);
+		if (ret) {
+			com_err(s->progname, ret, "while creating global user "
+				"quota file");
+			goto error;
+		}
+		ret = ocfs2_init_local_quota_files(fs, USRQUOTA);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while initializing local user quota files");
+			goto error;
+		}
+	}
+	if (!feature_skip(s, GROUP_QUOTA_SYSTEM_INODE)) {
+		ret = ocfs2_init_fs_quota_info(fs, GRPQUOTA);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while looking up global group quota file");
+			goto error;
+		}
+		fs->qinfo[GRPQUOTA].flags = 0;
+		fs->qinfo[GRPQUOTA].qi_info.dqi_syncms = OCFS2_DEF_QUOTA_SYNC;
+		fs->qinfo[GRPQUOTA].qi_info.dqi_bgrace = OCFS2_DEF_BLOCK_GRACE;
+		fs->qinfo[GRPQUOTA].qi_info.dqi_igrace = OCFS2_DEF_INODE_GRACE;
+		ret = ocfs2_new_quota_hash(&grp_hash);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while creating group quota hash.");
+			goto error;
+		}
+		ret = ocfs2_init_global_quota_file(fs, GRPQUOTA);
+		if (ret) {
+			com_err(s->progname, ret, "while creating global group "
+				"quota file");
+			goto error;
+		}
+
+		ret = ocfs2_init_local_quota_files(fs, GRPQUOTA);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while initializing local group quota files");
+			goto error;
+		}
+	}
+
+	ret = ocfs2_compute_quota_usage(fs, usr_hash, grp_hash);
+	if (ret) {
+		com_err(s->progname, ret, "while computing quota usage");
+		goto error;
+	}
+	if (usr_hash) {
+		ret = ocfs2_write_release_dquots(fs, USRQUOTA, usr_hash);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while writing user quota usage");
+			goto error;
+		}
+		ret = ocfs2_free_quota_hash(usr_hash);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while releasing user quota hash");
+			goto error;
+		}
+	}
+	if (grp_hash) {
+		ret = ocfs2_write_release_dquots(fs, GRPQUOTA, grp_hash);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while writing group quota usage");
+			goto error;
+		}
+		ret = ocfs2_free_quota_hash(grp_hash);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while releasing group quota hash");
+			goto error;
+		}
+	}
+	return;
+error:
+	clear_both_ends(s);
+	exit(1);
 }
 
 static void grow_extent_allocator(State *s, ocfs2_filesys *fs)
@@ -306,6 +513,26 @@ static void finish_normal_format(State *s)
 		printf("done\n");
 
 	if (!s->quiet)
+		printf("Formatting quota files: ");
+
+	format_quota_files(s, fs);
+
+	if (!s->quiet)
+		printf("done\n");
+
+	if (s->dx_dirs && !s->inline_data) {
+		/*
+		 * We want to do this after quota, but before adding
+		 * any new entries to directories.
+		 */
+		if (!s->quiet)
+			printf("Indexing system directories: ");
+		index_system_dirs(s, fs);
+		if (!s->quiet)
+			printf("done\n");
+	}
+
+	if (!s->quiet)
 		printf("Writing lost+found: ");
 	create_lost_found_dir(s, fs);
 	if (!s->quiet)
@@ -371,8 +598,6 @@ main(int argc, char **argv)
 	open_device(s);
 
 	fill_defaults(s);
-
-	generate_uuid (s);
 
 	create_generation(s);
 
@@ -466,7 +691,8 @@ main(int argc, char **argv)
 	add_entry_to_directory(s, root_dir, "..", root_dir_rec.fe_off, OCFS2_FT_DIR);
 
 	need = system_dir_bytes_needed(s);
-	if (!s->inline_data || need > ocfs2_max_inline_data(s->blocksize)) {
+	if (!s->inline_data ||
+	    need > ocfs2_max_inline_data_with_xattr(s->blocksize, NULL)) {
 		need = system_dir_blocks_needed(s) << s->blocksize_bits;
 		alloc_bytes_from_bitmap(s, need, s->global_bm,
 					&system_dir_rec.extent_off,
@@ -482,6 +708,8 @@ main(int argc, char **argv)
 
 	for (i = 0; i < NUM_SYSTEM_INODES; i++) {
 		if (hb_dev_skip(s, i))
+			continue;
+		if (feature_skip(s, i))
 			continue;
 
 		num = (system_files[i].global) ? 1 : s->initial_slots;
@@ -541,6 +769,8 @@ main(int argc, char **argv)
 	for (i = 0; i < NUM_SYSTEM_INODES; i++) {
 		if (hb_dev_skip(s, i))
 			continue;
+		if (feature_skip(s, i))
+			continue;
 
 		num = system_files[i].global ? 1 : s->initial_slots;
 		for (j = 0; j < num; j++) {
@@ -598,20 +828,20 @@ main(int argc, char **argv)
 
 static void
 parse_fs_type_opts(char *progname, const char *typestr,
-		   enum ocfs2_fs_types *fs_type)
+		   enum ocfs2_mkfs_types *fs_type)
 {
 	int i;
 
-	*fs_type = FS_DEFAULT;
+	*fs_type = OCFS2_MKFSTYPE_DEFAULT;
 
-	for(i = 0; ocfs2_fs_types_table[i].ft_str; i++) {
-		if (strcmp(typestr, ocfs2_fs_types_table[i].ft_str) == 0) {
-			*fs_type = ocfs2_fs_types_table[i].ft_type;
+	for(i = 0; ocfs2_mkfs_types_table[i].ft_str; i++) {
+		if (strcmp(typestr, ocfs2_mkfs_types_table[i].ft_str) == 0) {
+			*fs_type = ocfs2_mkfs_types_table[i].ft_type;
 			break;
 		}
 	}
 
-	if (*fs_type == FS_DEFAULT) {
+	if (*fs_type == OCFS2_MKFSTYPE_DEFAULT) {
 		com_err(progname, 0, "Bad fs type option specified.");
 		exit(1);
 	}
@@ -626,6 +856,7 @@ get_state(int argc, char **argv)
 	char *vol_label = NULL;
 	char *stack_name = NULL;
 	char *cluster_name = NULL;
+	int globalhb = 0;
 	unsigned int initial_slots = 0;
 	char *dummy;
 	State *s;
@@ -633,11 +864,12 @@ get_state(int argc, char **argv)
 	int verbose = 0, quiet = 0, force = 0, xtool = 0, hb_dev = 0;
 	int show_version = 0, dry_run = 0;
 	char *device_name;
+	char *uuid = NULL, uuid_36[37] = {'\0'}, *uuid_p;
 	int ret;
 	uint64_t val;
 	uint64_t journal_size_in_bytes = 0;
 	int journal64 = 0;
-	enum ocfs2_fs_types fs_type = FS_DEFAULT;
+	enum ocfs2_mkfs_types fs_type = OCFS2_MKFSTYPE_DEFAULT;
 	int mount = -1;
 	int no_backup_super = -1;
 	enum ocfs2_feature_levels level = OCFS2_FEATURE_LEVEL_DEFAULT;
@@ -661,6 +893,7 @@ get_state(int argc, char **argv)
 		{ "fs-features=", 1, 0, FEATURES_OPTION },
 		{ "cluster-stack=", 1, 0, CLUSTER_STACK_OPTION },
 		{ "cluster-name=", 1, 0, CLUSTER_NAME_OPTION },
+		{ "global-heartbeat", 0, 0, GLOBAL_HEARTBEAT_OPTION },
 		{ 0, 0, 0, 0}
 	};
 
@@ -670,8 +903,8 @@ get_state(int argc, char **argv)
 		progname = strdup("mkfs.ocfs2");
 
 	while (1) {
-		c = getopt_long(argc, argv, "b:C:L:N:J:M:vnqVFHxT:", long_options,
-				NULL);
+		c = getopt_long(argc, argv, "b:C:L:N:J:M:vnqVFHxT:U:",
+				long_options, NULL);
 
 		if (c == -1)
 			break;
@@ -764,6 +997,10 @@ get_state(int argc, char **argv)
 					   &journal64);
 			break;
 
+		case 'U':
+			uuid = strdup(optarg);
+			break;
+
 		case 'H':
 			hb_dev = 1;
 			break;
@@ -826,9 +1063,9 @@ get_state(int argc, char **argv)
 					"Option --cluster-stack requires an argument");
 				exit(1);
 			}
-			if (strlen(optarg) != OCFS2_STACK_LABEL_LEN) {
-				com_err(progname, 0,
-					"Invalid argument to --cluster-stack");
+			if (!o2cb_valid_stack_name(optarg)) {
+				com_err(progname, O2CB_ET_INVALID_STACK_NAME,
+					"; unknown cluster stack '%s'", optarg);
 				exit(1);
 			}
 			if (stack_name)
@@ -842,14 +1079,13 @@ get_state(int argc, char **argv)
 					"Option --cluster-name requires an argument");
 				exit(1);
 			}
-			if (strlen(optarg) > OCFS2_CLUSTER_NAME_LEN) {
-				com_err(progname, 0,
-					"Cluster name is too long");
-				exit(1);
-			}
 			if (cluster_name)
 				free(cluster_name);
 			cluster_name = strdup(optarg);
+			break;
+
+		case GLOBAL_HEARTBEAT_OPTION:
+			globalhb = 1;
 			break;
 
 		default:
@@ -860,6 +1096,8 @@ get_state(int argc, char **argv)
 
 	if ((optind == argc) && !show_version)
 		usage(progname);
+
+	srand48(time(NULL));
 
 	device_name = argv[optind];
 	optind++;
@@ -917,6 +1155,7 @@ get_state(int argc, char **argv)
 	s->fs_type = fs_type;
 
 	ret = ocfs2_merge_feature_flags_with_level(&s->feature_flags,
+						   fs_type,
 						   level,
 						   &feature_flags,
 						   &reverse_flags);
@@ -939,7 +1178,33 @@ get_state(int argc, char **argv)
 		s->no_backup_super = 0;
 	else
 		s->no_backup_super = 1;
+	if (s->feature_flags.opt_incompat & OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS)
+		s->dx_dirs = 1;
+	else
+		s->dx_dirs = 0;
 
+	/* uuid */
+	if (!uuid)
+		uuid_generate(s->uuid);
+	else {
+		if (strlen(uuid) == 32) {
+			translate_uuid(uuid, uuid_36);
+			uuid_p = uuid_36;
+		} else
+			uuid_p = uuid;
+
+		/*uuid_parse only support 36 bytes uuid*/
+		if (uuid_parse(uuid_p, s->uuid)) {
+			com_err(s->progname, 0, "Invalid UUID specified");
+			exit(1);
+		}
+		printf("\nWARNING!!! OCFS2 uses the UUID to uniquely identify "
+		       "a file system.\nHaving two OCFS2 file systems with "
+		       "the same UUID could, in the least,\ncause erratic "
+		       "behavior, and if unlucky, cause file system damage.\n"
+		       "Please choose the UUID with care.\n\n");
+		free(uuid);
+	}
 
 	/* Here if the user set these flags explicitly, we will use them and
 	 * discard the setting in the features set.
@@ -947,15 +1212,14 @@ get_state(int argc, char **argv)
 	if (mount != -1)
 		s->mount = mount;
 
-	if ((stack_name || cluster_name) && (s->mount == MOUNT_LOCAL)) {
-		com_err(progname, 0,
-			"Local mount is incompatible with specifying a cluster stack");
+	if (!is_cluster_info_valid(s, stack_name, cluster_name, globalhb))
 		exit(1);
-	}
-	if (stack_name)
-		s->cluster_stack = stack_name;
-	if (cluster_name)
-		s->cluster_name = cluster_name;
+
+	s->cluster_stack = stack_name;
+	s->cluster_name = cluster_name;
+	if (globalhb)
+		s->stack_flags |= OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT;
+	s->global_heartbeat = globalhb;
 
 	if (no_backup_super != -1)
 		s->no_backup_super = no_backup_super;
@@ -1093,11 +1357,13 @@ usage(const char *progname)
 {
 	fprintf(stderr, "usage: %s [-b block-size] [-C cluster-size] "
 		"[-J journal-options]\n\t\t[-L volume-label] [-M mount-type] "
-		"[-N number-of-node-slots]\n\t\t[-T filesystem-type] [-HFqvV] "
+		"[-N number-of-node-slots]\n\t\t[-T filesystem-type] [-U uuid]"
+		"[-HFnqvV] [--dry-run]"
 		"\n\t\t[--fs-feature-level=[default|max-compat|max-features]] "
-		"\n\t\t[--fs-features=[[no]sparse,...]]"
-		"[--no-backup-super] device [blocks-count]\n", progname);
-	exit(0);
+		"\n\t\t[--fs-features=[[no]sparse,...]] [--global-heartbeat]"
+		"\n\t\t[--cluster-stack=stackname] [--cluster-name=clustername]"
+		"\n\t\t[--no-backup-super] device [blocks-count]\n", progname);
+	exit(1);
 }
 
 static void
@@ -1140,6 +1406,15 @@ static unsigned int journal_size_mail(State *s)
 	return 65536;
 }
 
+static unsigned int journal_size_vmstore(State *s)
+{
+	if (s->volume_size_in_blocks < 262144)
+		return 8192;
+	else if (s->volume_size_in_blocks < 524288)
+		return 16384;
+	return 32768;
+}
+
 /* stolen from e2fsprogs, modified to fit ocfs2 patterns */
 static uint64_t figure_journal_size(uint64_t size, State *s)
 {
@@ -1169,11 +1444,14 @@ static uint64_t figure_journal_size(uint64_t size, State *s)
 	}
 
 	switch (s->fs_type) {
-	case FS_DATAFILES:
+	case OCFS2_MKFSTYPE_DATAFILES:
 		j_blocks = journal_size_datafiles();
 		break;
-	case FS_MAIL:
+	case OCFS2_MKFSTYPE_MAIL:
 		j_blocks = journal_size_mail(s);
+		break;
+	case OCFS2_MKFSTYPE_VMSTORE:
+		j_blocks = journal_size_vmstore(s);
 		break;
 	default:
 		j_blocks = journal_size_default(s);
@@ -1229,7 +1507,8 @@ static uint32_t cluster_size_datafiles(State *s)
 
 static uint32_t figure_extent_alloc_size(State *s)
 {
-	uint32_t cpg, numgroups;
+	uint32_t cpg;
+	int numgroups;
 	uint64_t unitsize, totalsize;
 	double curr_percent, target_percent;
 
@@ -1237,10 +1516,11 @@ static uint32_t figure_extent_alloc_size(State *s)
 		return 0;
 
 	switch (s->fs_type) {
-	case FS_DATAFILES:
+	case OCFS2_MKFSTYPE_DATAFILES:
+	case OCFS2_MKFSTYPE_VMSTORE:
 		target_percent = 0.3;
 		break;
-	case FS_MAIL:
+	case OCFS2_MKFSTYPE_MAIL:
 	default:
 		target_percent = 0.1;
 		break;
@@ -1258,6 +1538,11 @@ static uint32_t figure_extent_alloc_size(State *s)
 			break;
 		totalsize += unitsize;
 	}
+
+	if (curr_percent > MAX_EXTALLOC_RESERVE_PERCENT)
+		--numgroups;
+
+	assert(numgroups >= 0);
 
 	return cpg * numgroups;
 }
@@ -1397,7 +1682,8 @@ fill_defaults(State *s)
 
 	if (!s->cluster_size) {
 		switch (s->fs_type) {
-		case FS_DATAFILES:
+		case OCFS2_MKFSTYPE_DATAFILES:
+		case OCFS2_MKFSTYPE_VMSTORE:
 			s->cluster_size = cluster_size_datafiles(s);
 			break;
 		default:
@@ -1534,7 +1820,8 @@ initialize_alloc_group(State *s, const char *name,
 
 	strcpy((char *)group->gd->bg_signature, OCFS2_GROUP_DESC_SIGNATURE);
 	group->gd->bg_generation = s->vol_generation;
-	group->gd->bg_size = (uint32_t)ocfs2_group_bitmap_size(s->blocksize);
+	group->gd->bg_size =
+			(uint32_t)ocfs2_group_bitmap_size(s->blocksize, 0, 0);
 	group->gd->bg_bits = cpg * bpc;
 	group->gd->bg_chain = chain;
 	group->gd->bg_parent_dinode = alloc_inode->fe_off >> 
@@ -2015,6 +2302,24 @@ static void mkfs_swap_inode_from_cpu(State *s, struct ocfs2_dinode *di)
 	ocfs2_swap_inode_from_cpu(&fake_fs, di);
 }
 
+static void mkfs_swap_group_desc_from_cpu(State *s, struct ocfs2_group_desc *gd)
+{
+	ocfs2_filesys fake_fs;
+	char super_buf[OCFS2_MAX_BLOCKSIZE];
+
+	fill_fake_fs(s, &fake_fs, super_buf);
+	ocfs2_swap_group_desc_from_cpu(&fake_fs, gd);
+}
+
+static void mkfs_swap_group_desc_to_cpu(State *s, struct ocfs2_group_desc *gd)
+{
+	ocfs2_filesys fake_fs;
+	char super_buf[OCFS2_MAX_BLOCKSIZE];
+
+	fill_fake_fs(s, &fake_fs, super_buf);
+	ocfs2_swap_group_desc_to_cpu(&fake_fs, gd);
+}
+
 static void
 format_superblock(State *s, SystemFileDiskRecord *rec,
 		  SystemFileDiskRecord *root_rec, SystemFileDiskRecord *sys_rec)
@@ -2066,12 +2371,24 @@ format_superblock(State *s, SystemFileDiskRecord *rec,
 
 	if (s->cluster_stack) {
 		s->feature_flags.opt_incompat |=
-			(OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP|
-			 OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK);
+			OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP;
+
+		/* Selectively enable clusterinfo or userspace stack */
+		if (!(s->feature_flags.opt_incompat &
+		      OCFS2_FEATURE_INCOMPAT_CLUSTERINFO)) {
+			if (!is_classic_stack(s->cluster_stack))
+				s->feature_flags.opt_incompat |=
+					OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
+			else
+				s->feature_flags.opt_incompat |=
+					OCFS2_FEATURE_INCOMPAT_CLUSTERINFO;
+		}
+
 		memcpy(di->id2.i_super.s_cluster_info.ci_stack,
 		       s->cluster_stack, OCFS2_STACK_LABEL_LEN);
 		memcpy(di->id2.i_super.s_cluster_info.ci_cluster,
 		       s->cluster_name, OCFS2_CLUSTER_NAME_LEN);
+		di->id2.i_super.s_cluster_info.ci_stackflags = s->stack_flags;
 	}
 
 	/*
@@ -2082,18 +2399,27 @@ format_superblock(State *s, SystemFileDiskRecord *rec,
 	 */
 	s->feature_flags.opt_compat &= ~OCFS2_FEATURE_COMPAT_BACKUP_SB;
 
-	if (s->feature_flags.opt_incompat & OCFS2_FEATURE_INCOMPAT_XATTR) {
+	if (s->feature_flags.opt_incompat & OCFS2_FEATURE_INCOMPAT_XATTR)
 		di->id2.i_super.s_xattr_inline_size =
 						OCFS2_MIN_XATTR_INLINE_SIZE;
-		di->id2.i_super.s_uuid_hash = ocfs2_xattr_uuid_hash(s->uuid);
-	}
 
 	di->id2.i_super.s_feature_incompat = s->feature_flags.opt_incompat;
 	di->id2.i_super.s_feature_compat = s->feature_flags.opt_compat;
 	di->id2.i_super.s_feature_ro_compat = s->feature_flags.opt_ro_compat;
 
 	strcpy((char *)di->id2.i_super.s_label, s->vol_label);
-	memcpy(di->id2.i_super.s_uuid, s->uuid, 16);
+	memcpy(di->id2.i_super.s_uuid, s->uuid, OCFS2_VOL_UUID_LEN);
+
+	/* s_uuid_hash is also used by Indexed Dirs */
+	if (s->feature_flags.opt_incompat & OCFS2_FEATURE_INCOMPAT_XATTR ||
+	    s->feature_flags.opt_incompat & OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS)
+		di->id2.i_super.s_uuid_hash = ocfs2_xattr_uuid_hash(s->uuid);
+
+	if (s->feature_flags.opt_incompat & OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS) {
+		di->id2.i_super.s_dx_seed[0] = mrand48();
+		di->id2.i_super.s_dx_seed[1] = mrand48();
+		di->id2.i_super.s_dx_seed[2] = mrand48();
+	}
 
 	mkfs_swap_inode_from_cpu(s, di);
 	mkfs_compute_meta_ecc(s, di, &di->i_check);
@@ -2180,7 +2506,7 @@ format_file(State *s, SystemFileDiskRecord *rec)
 		di->id2.i_chain.cl_count = 
 			ocfs2_chain_recs_per_inode(s->blocksize);
 		di->id2.i_chain.cl_cpg =
-				 ocfs2_group_bitmap_size(s->blocksize) * 8;
+			 ocfs2_group_bitmap_size(s->blocksize, 0, 0) * 8;
 		di->id2.i_chain.cl_bpc = 1;
 		if (s->nr_cluster_groups > 
 		    ocfs2_chain_recs_per_inode(s->blocksize)) {
@@ -2243,21 +2569,25 @@ format_file(State *s, SystemFileDiskRecord *rec)
 			(struct ocfs2_dir_entry *)(dir->buf + dir->last_off);
 		int dir_len = dir->last_off + OCFS2_DIR_REC_LEN(de->name_len);
 
-		if (dir_len > ocfs2_max_inline_data(s->blocksize)) {
+		if (dir_len >
+		    ocfs2_max_inline_data_with_xattr(s->blocksize, di)) {
 			com_err(s->progname, 0,
 				"Inline a dir which shouldn't be inline.\n");
 			clear_both_ends(s);
 			exit(1);
 		}
 		de->rec_len -= s->blocksize -
-			       ocfs2_max_inline_data(s->blocksize);
+			       ocfs2_max_inline_data_with_xattr(s->blocksize,
+								di);
 		memset(&di->id2, 0,
 		       s->blocksize - offsetof(struct ocfs2_dinode, id2));
 
-		di->id2.i_data.id_count = ocfs2_max_inline_data(s->blocksize);
+		di->id2.i_data.id_count =
+			ocfs2_max_inline_data_with_xattr(s->blocksize, di);
 		memcpy(di->id2.i_data.id_data, dir->buf, dir_len);
 		di->i_dyn_features |= OCFS2_INLINE_DATA_FL;
-		di->i_size = ocfs2_max_inline_data(s->blocksize);
+		di->i_size = ocfs2_max_inline_data_with_xattr(s->blocksize,
+							      di);
 	}
 
 write_out:
@@ -2306,7 +2636,7 @@ write_bitmap_data(State *s, AllocBitmap *bitmap)
 		gd->bg_parent_dinode = parent_blkno;
 		memcpy(buf, gd, s->blocksize);
 		gd_buf = (struct ocfs2_group_desc *)buf;
-		ocfs2_swap_group_desc(gd_buf);
+		mkfs_swap_group_desc_from_cpu(s, gd_buf);
 		mkfs_compute_meta_ecc(s, buf, &gd_buf->bg_check);
 		do_pwrite(s, buf, s->cluster_size,
 			  gd->bg_blkno << s->blocksize_bits);
@@ -2318,10 +2648,10 @@ static void
 write_group_data(State *s, AllocGroup *group)
 {
 	uint64_t blkno = group->gd->bg_blkno;
-	ocfs2_swap_group_desc(group->gd);
+	mkfs_swap_group_desc_from_cpu(s, group->gd);
 	mkfs_compute_meta_ecc(s, group->gd, &group->gd->bg_check);
 	do_pwrite(s, group->gd, s->blocksize, blkno << s->blocksize_bits);
-	ocfs2_swap_group_desc(group->gd);
+	mkfs_swap_group_desc_to_cpu(s, group->gd);
 }
 
 static void mkfs_swap_dir(State *s, DirData *dir,
@@ -2441,13 +2771,6 @@ initial_slots_for_volume(uint64_t size)
 		return 16;
 }
 
-static void
-generate_uuid(State *s)
-{
-	s->uuid = do_malloc(s, OCFS2_VOL_UUID_LEN);
-	uuid_generate(s->uuid);
-}
-
 static void create_generation(State *s)
 {
 	int randfd = 0;
@@ -2500,6 +2823,9 @@ init_record(State *s, SystemFileDiskRecord *rec, int type, int mode)
 	case SFI_TRUNCATE_LOG:
 		rec->flags |= OCFS2_DEALLOC_FL;
 		break;
+	case SFI_QUOTA:
+		rec->flags |= OCFS2_QUOTA_FL;
+		break;
 	case SFI_OTHER:
 		break;
 	}
@@ -2526,11 +2852,11 @@ print_state(State *s)
 
 	ocfs2_snprint_feature_flags(buf, PATH_MAX, &s->feature_flags);
 
-	if (s->fs_type != FS_DEFAULT) {
-		for(i = 0; ocfs2_fs_types_table[i].ft_str; i++) {
-			if (ocfs2_fs_types_table[i].ft_type == s->fs_type) {
+	if (s->fs_type != OCFS2_MKFSTYPE_DEFAULT) {
+		for(i = 0; ocfs2_mkfs_types_table[i].ft_str; i++) {
+			if (ocfs2_mkfs_types_table[i].ft_type == s->fs_type) {
 				printf("Filesystem Type of %s\n",
-				       ocfs2_fs_types_table[i].ft_str);
+				       ocfs2_mkfs_types_table[i].ft_str);
 				break;
 			}
 		}
@@ -2573,6 +2899,44 @@ clear_both_ends(State *s)
 	free(buf);
 
 	return ;
+}
+
+static void index_system_dirs(State *s, ocfs2_filesys *fs)
+{
+	errcode_t ret;
+	int i, num_slots = OCFS2_RAW_SB(fs->fs_super)->s_max_slots;
+	uint64_t orphan_dir_blkno;
+
+
+	/* Start with the root directory */
+	ret = ocfs2_dx_dir_build(fs, fs->fs_root_blkno);
+	if (ret) {
+		com_err(s->progname, ret, "while indexing root directory");
+		goto bail;
+	}
+
+	for (i = 0; i < num_slots; i++) {
+		ret = ocfs2_lookup_system_inode(fs, ORPHAN_DIR_SYSTEM_INODE,
+						i, &orphan_dir_blkno);
+		if (ret) {
+			com_err(s->progname, ret,
+				"while looking up orphan dir %d for indexing",
+				i);
+			goto bail;
+		}
+
+		ret = ocfs2_dx_dir_build(fs, orphan_dir_blkno);
+		if (ret) {
+			com_err(s->progname, ret, "while indexing root directory");
+			goto bail;
+		}
+	}
+
+	return;
+
+bail:
+	clear_both_ends(s);
+	exit(1);
 }
 
 static void create_lost_found_dir(State *s, ocfs2_filesys *fs)

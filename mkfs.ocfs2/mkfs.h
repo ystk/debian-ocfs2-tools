@@ -40,6 +40,7 @@
 #include <netinet/in.h>
 #include <inttypes.h>
 #include <ctype.h>
+#include <assert.h>
 
 #include <uuid/uuid.h>
 
@@ -89,6 +90,8 @@
 
 #define CLUSTERS_MAX           (UINT32_MAX - 1)
 
+#define MAX_EXTALLOC_RESERVE_PERCENT	5
+
 enum {
 	SFI_JOURNAL,
 	SFI_CLUSTER,
@@ -96,13 +99,8 @@ enum {
 	SFI_HEARTBEAT,
 	SFI_CHAIN,
 	SFI_TRUNCATE_LOG,
+	SFI_QUOTA,
 	SFI_OTHER
-};
-
-enum ocfs2_fs_types {
-	FS_DEFAULT,
-	FS_DATAFILES,
-	FS_MAIL
 };
 
 typedef struct _SystemFileInfo SystemFileInfo;
@@ -193,6 +191,7 @@ struct _State {
 	int mount;
 	int no_backup_super;
 	int inline_data;
+	int dx_dirs;
 	int dry_run;
 
 	uint32_t blocksize;
@@ -219,9 +218,11 @@ struct _State {
 
 	char *vol_label;
 	char *device_name;
-	unsigned char *uuid;
+	unsigned char uuid[OCFS2_VOL_UUID_LEN];
 	char *cluster_stack;
 	char *cluster_name;
+	uint8_t stack_flags;
+	int global_heartbeat;
 	uint32_t vol_generation;
 
 	int fd;
@@ -238,8 +239,10 @@ struct _State {
 
 	ocfs2_fs_options feature_flags;
 
-	enum ocfs2_fs_types fs_type;
+	enum ocfs2_mkfs_types fs_type;
 };
 
+int is_classic_stack(char *stack_name);
+void cluster_fill(char **stack_name, char **cluster_name, uint8_t *stack_flags);
 int ocfs2_fill_cluster_information(State *s);
 int ocfs2_check_volume(State *s);

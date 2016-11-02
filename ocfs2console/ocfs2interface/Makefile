@@ -8,13 +8,17 @@ CFLAGS += -fPIC
 
 PYMOD_CFLAGS = -fno-strict-aliasing $(PYTHON_INCLUDES)
 
-LIBOCFS2_LIBS = -L$(TOPDIR)/libocfs2 -locfs2
+LIBOCFS2_LIBS = -L$(TOPDIR)/libocfs2 -locfs2 -laio
 LIBOCFS2_DEPS = $(TOPDIR)/libocfs2/libocfs2.a
 
 LIBO2DLM_LIBS = -L$(TOPDIR)/libo2dlm -lo2dlm $(DL_LIBS)
 LIBO2DLM_DEPS = $(TOPDIR)/libo2dlm/libo2dlm.a
 
+ifneq ($(BUILD_FSDLM_SUPPORT),)
+LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb -ldlm_lt
+else
 LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb
+endif
 LIBO2CB_DEPS = $(TOPDIR)/libo2cb/libo2cb.a
 
 ifdef HAVE_BLKID

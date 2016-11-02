@@ -103,7 +103,7 @@ ec	OCFS2_ET_NO_DIRECTORY,
 	"OCFS2 inode is not a directory"
 
 ec	OCFS2_ET_FILE_NOT_FOUND,
-	"File not found by ocfs2_lookup"
+	"Directory entry not found"
 
 ec	OCFS2_ET_DIR_NO_SPACE,
 	"No free space in the directory"
@@ -163,7 +163,7 @@ ec	OCFS2_ET_INVALID_LOCKRES,
 	"The lock name is invalid"
 
 ec	OCFS2_ET_NO_IONICE,
-	"Can't find ionice"
+	"Unable to find ionice(1)"
 
 ec	OCFS2_ET_NO_BACKUP_SUPER,
 	"Backup superblock not found"
@@ -172,7 +172,7 @@ ec      OCFS2_ET_TOO_MANY_SLOTS,
         "Too many slots for slot map"
 
 ec	OCFS2_ET_CANNOT_INLINE_DATA,
-	"Can't write the data inline"
+	"Unable to write the data inline"
 
 ec	OCFS2_ET_BAD_DIR_BLOCK_MAGIC,
 	"Bad magic number in directory block"
@@ -183,7 +183,19 @@ ec	OCFS2_ET_BAD_XATTR_BLOCK_MAGIC,
 ec	OCFS2_ET_UNKNOWN_FEATURE,
 	"Unknown feature"
 
+ec	OCFS2_ET_CORRUPT_QUOTA_FILE,
+	"Quota file is corrupted"
+
 ec	OCFS2_ET_CANNOT_DETERMINE_SECTOR_SIZE,
-	"Cannot determine sector size"
+	"Unable to determine the sector size"
+
+ec	OCFS2_ET_DX_BALANCE_EMPTY_LEAF,
+	"Trying to rebalance empty leaf for indexed dir"
+
+ec	OCFS2_ET_NONEMTY_QUOTA_HASH,
+	"Freeing non-empty quota hash"
+
+ec	OCFS2_ET_BAD_CRC32,
+	"Bad CRC32"
 
 	end

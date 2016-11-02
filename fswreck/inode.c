@@ -29,7 +29,7 @@
  * Inode field error: 	INODE_SUBALLOC, INODE_GEN, INODE_GEN_FIX,INODE_BLKNO,
 			INODE_NZ_DTIME, INODE_SIZE, INODE_CLUSTERS, INODE_COUNT
  *
- * Inode link not connected error: INODE_LINK_NOT_CONNECTED
+ * Inode link not connected error: INODE_NOT_CONNECTED
  *
  * Inode orphaned error:	INODE_ORPHANED
  *
@@ -106,7 +106,7 @@ static void damage_inode(ocfs2_filesys *fs, uint64_t blkno,
 	case INODE_SPARSE_SIZE:
 		fprintf(stdout, "INODE_SPARSE_SIZE: "
 			"Corrupt inode#%"PRIu64", change i_size "
-			"from %u to %u\n",
+			"from %"PRIu64" to %u\n",
 			 blkno, di->i_size, fs->fs_clustersize);
 		di->i_size = fs->fs_clustersize;
 		break;
@@ -126,6 +126,19 @@ static void damage_inode(ocfs2_filesys *fs, uint64_t blkno,
 		di->i_links_count = 0;
 		fprintf(stdout, "INODE_COUNT: "
 			"Corrupte inode#%"PRIu64", set link count to 0\n",
+			blkno);
+		break;
+	case REFCOUNT_FLAG_INVALID:
+		di->i_dyn_features |= OCFS2_HAS_REFCOUNT_FL;
+		fprintf(stdout, "REFCOUNT_FLAG_INVALD: "
+			"Corrupt inode#%"PRIu64", add refcount feature\n",
+			blkno);
+		break;
+	case REFCOUNT_LOC_INVALID:
+		di->i_refcount_loc = 100;
+		fprintf(stdout, "REFCOUNT_LOC_INVALID: "
+			"Create an inode#%"PRIu64","
+			"whose i_refcount_loc has been messed up.\n",
 			blkno);
 		break;
 	default:
@@ -184,6 +197,13 @@ void mess_up_inode_field(ocfs2_filesys *fs, enum fsck_type type, uint64_t blkno)
 		if (ret)
 			FSWRK_COM_FATAL(progname, ret);
 	}
+
+	if (type == REFCOUNT_FLAG_INVALID &&
+	    ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)))
+		FSWRK_FATAL("should specfiy a norefcount volume\n");
+	if (type == REFCOUNT_LOC_INVALID &&
+	    !ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)))
+		FSWRK_FATAL("Should specify a refcount supported volume\n");
 
 	damage_inode(fs, tmpblkno, type);
 	return;
@@ -350,7 +370,8 @@ void mess_up_inline_inode(ocfs2_filesys *fs, enum fsck_type type, uint64_t blkno
 			FSWRK_COM_FATAL(progname, ret);
 
 		di = (struct ocfs2_dinode *)buf;
-		max_inline_sz = ocfs2_max_inline_data(fs->fs_blocksize);
+		max_inline_sz =
+			ocfs2_max_inline_data_with_xattr(fs->fs_blocksize, di);
 
 		if (!(di->i_dyn_features & OCFS2_INLINE_DATA_FL))
 			di->i_dyn_features |= OCFS2_INLINE_DATA_FL;
@@ -505,4 +526,3 @@ void mess_up_dup_clusters(ocfs2_filesys *fs, enum fsck_type type,
 
 	ocfs2_free(&buf);
 }
-

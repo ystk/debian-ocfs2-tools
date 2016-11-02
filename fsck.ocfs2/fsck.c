@@ -30,6 +30,8 @@
  * pass2.c: verify directory entries, record some linkage metadata
  * pass3.c: make sure all dirs are reachable
  * pass4.c: resolve inode's link counts, move disconnected inodes to lost+found
+ * pass5.c: load global quota file, merge node-local quota files to global
+ *          quota file, recompute quota usage and recreate quota files
  *
  * When hacking on this keep the following in mind:
  *
@@ -65,6 +67,7 @@
 #include "pass2.h"
 #include "pass3.h"
 #include "pass4.h"
+#include "pass5.h"
 #include "problem.h"
 #include "util.h"
 #include "slot_recovery.h"
@@ -115,12 +118,13 @@ static void block_signals(int how)
 static void print_usage(void)
 {
 	fprintf(stderr,
-		"Usage: fsck.ocfs2 [ -fGnuvVy ] [ -b superblock block ]\n"
+		"Usage: fsck.ocfs2 {-y|-n|-p} [ -fGnuvVy ] [ -b superblock block ]\n"
 		"		    [ -B block size ] [-r num] device\n"
 		"\n"
 		"Critical flags for emergency repair:\n" 
 		" -n		Check but don't change the file system\n"
 		" -y		Answer 'yes' to all repair questions\n"
+		" -p		Automatic repair (no questions, only safe repairs)\n"
 		" -f		Force checking even if file system is clean\n"
 		" -F		Ignore cluster locking (dangerous!)\n"
 		" -r		restore backup superblock(dangerous!)\n"
@@ -129,6 +133,9 @@ static void print_usage(void)
 		" -b superblock	Treat given block as the super block\n"
 		" -B blocksize	Force the given block size\n"
 		" -G		Ask to fix mismatched inode generations\n"
+		" -P		Show progress\n"
+		" -t		Show I/O statistics\n"
+		" -tt		Show I/O statistics per pass\n"
 		" -u		Access the device with buffering\n"
 		" -V		Output fsck.ocfs2's version\n"
 		" -v		Provide verbose debugging output\n"
@@ -403,6 +410,51 @@ static void print_version(void)
 	fprintf(stderr, "%s %s\n", whoami, VERSION);
 }
 
+#define P_(singular, plural, n) ((n) == 1 ? (singular) : (plural))
+
+static void show_stats(o2fsck_state *ost)
+{
+	uint32_t num_links;
+
+	if (!ost->ost_show_stats)
+		return;
+
+	num_links = ost->ost_links_count - ost->ost_dir_count;
+
+	printf("\n  # of inodes with depth 0/1/2/3/4/5: %u/%u/%u/%u/%u/%u\n",
+	       ost->ost_tree_depth_count[0], ost->ost_tree_depth_count[1],
+	       ost->ost_tree_depth_count[2], ost->ost_tree_depth_count[3],
+	       ost->ost_tree_depth_count[4], ost->ost_tree_depth_count[5]);
+	printf("  # of orphaned inodes found/deleted: %u/%u\n",
+	       ost->ost_orphan_count, ost->ost_orphan_deleted_count);
+
+	printf(P_("\n%12u regular file", "\n%12u regular files",
+		  ost->ost_file_count), ost->ost_file_count);
+	printf(P_(" (%u inline,", " (%u inlines,",
+		  ost->ost_inline_file_count), ost->ost_inline_file_count);
+	printf(P_(" %u reflink)\n", " %u reflinks)\n",
+		  ost->ost_reflinks_count), ost->ost_reflinks_count);
+	printf(P_("%12u directory", "%12u directories",
+		  ost->ost_dir_count), ost->ost_dir_count);
+	printf(P_(" (%u inline)\n", " (%u inlines)\n",
+		  ost->ost_inline_dir_count), ost->ost_inline_dir_count);
+	printf(P_("%12u character device file\n",
+		  "%12u character device files\n", ost->ost_chardev_count),
+	       ost->ost_chardev_count);
+	printf(P_("%12u block device file\n", "%12u block device files\n",
+		  ost->ost_blockdev_count), ost->ost_blockdev_count);
+	printf(P_("%12u fifo\n", "%12u fifos\n", ost->ost_fifo_count),
+	       ost->ost_fifo_count);
+	printf(P_("%12u link\n", "%12u links\n", num_links), num_links);
+	printf(P_("%12u symbolic link", "%12u symbolic links",
+		  ost->ost_symlinks_count), ost->ost_symlinks_count);
+	printf(P_(" (%u fast symbolic link)\n", " (%u fast symbolic links)\n",
+		  ost->ost_fast_symlinks_count), ost->ost_fast_symlinks_count);
+	printf(P_("%12u socket\n", "%12u sockets\n", ost->ost_sockets_count),
+	       ost->ost_sockets_count);
+	printf("\n");
+}
+
 static errcode_t open_and_check(o2fsck_state *ost, char *filename,
 				int open_flags, uint64_t blkno,
 				uint64_t blksize)
@@ -587,23 +639,24 @@ static errcode_t recover_cluster_info(o2fsck_state *ost)
 	     !strcmp(running.c_cluster, disk.c_cluster)))
 		goto bail;
 
+#define RECOVER_CLUSTER_WARNING						\
+	"The running cluster is using the %s stack\n"			\
+	"%s%s, but the filesystem is configured for\n"			\
+	"the %s stack%s%s. Thus, %s cannot\n"				\
+	"determine whether the filesystem is in use or not. This utility can\n"\
+	"reconfigure the filesystem to use the currently running cluster configuration.\n"\
+	"DANGER: YOU MUST BE ABSOLUTELY SURE THAT NO OTHER NODE IS USING THIS\n"\
+	"FILESYSTEM BEFORE MODIFYING ITS CLUSTER CONFIGURATION.\n"	\
+	"Recover cluster configuration information the running cluster?"
+
 	/* recover the backup information to superblock. */
-	if (prompt(ost, PN, PR_RECOVER_CLUSTER_INFO,
-		   "The running cluster is using the %s stack%s%s, but "
-		   "the filesystem is configured for the %s stack%s%s.  "
-		   "Thus, %s cannot determine whether the filesystem is in "
-		   "use.  %s can reconfigure the filesystem to use the "
-		   "currently running cluster configuration.  DANGER: "
-		   "YOU MUST BE ABSOLUTELY SURE THAT NO OTHER NODE IS "
-		   "USING THIS FILESYSTEM BEFORE MODIFYING ITS CLUSTER "
-		   "CONFIGURATION.  Recover cluster configuration "
-		   "information the running cluster?",
+	if (prompt(ost, PN, PR_RECOVER_CLUSTER_INFO, RECOVER_CLUSTER_WARNING,
 		   running.c_stack ? running.c_stack : "classic o2cb",
-		   running.c_stack ? " with the cluster name " : "",
+		   running.c_stack ? "with the cluster name " : "",
 		   running.c_stack ? running.c_cluster : "",
 		   disk.c_stack ? disk.c_stack : "classic o2cb",
 		   disk.c_stack ? " with the cluster name " : "",
-		   disk.c_stack ? disk.c_cluster : "", whoami, whoami)) {
+		   disk.c_stack ? disk.c_cluster : "", whoami)) {
 		ret = ocfs2_set_cluster_desc(ost->ost_fs, &running);
 		if (ret)
 			goto bail;
@@ -639,6 +692,7 @@ int main(int argc, char **argv)
 	ost->ost_ask = 1;
 	ost->ost_dirblocks.db_root = RB_ROOT;
 	ost->ost_dir_parents = RB_ROOT;
+	ost->ost_refcount_trees = RB_ROOT;
 
 	/* These mean "autodetect" */
 	blksize = 0;
@@ -650,7 +704,9 @@ int main(int argc, char **argv)
 	setlinebuf(stderr);
 	setlinebuf(stdout);
 
-	while((c = getopt(argc, argv, "b:B:fFGnuvVyr:")) != EOF) {
+	tools_progress_disable();
+
+	while ((c = getopt(argc, argv, "b:B:DfFGnupavVytPr:")) != EOF) {
 		switch (c) {
 			case 'b':
 				blkno = read_number(optarg);
@@ -675,6 +731,9 @@ int main(int argc, char **argv)
 					goto out;
 				}
 				break;
+			case 'D':
+				ost->ost_compress_dirs = 1;
+				break;
 
 			case 'F':
 				ost->ost_skip_o2cb = 1;
@@ -689,10 +748,27 @@ int main(int argc, char **argv)
 				break;
 
 			case 'n':
-				ost->ost_ask = 0;
-				ost->ost_answer = 0;
 				open_flags &= ~OCFS2_FLAG_RW;
 				open_flags |= OCFS2_FLAG_RO;
+				/* Fall through */
+
+			case 'a':
+			case 'p':
+				/*
+				 * Like extN, -a maps to -p, which is
+				 * 'preen'.  This means only fix things
+				 * that don't require human interaction.
+				 * Unlike extN, this is only journal
+				 * replay for now.  To make it smarter,
+				 * ost->ost_answer needs to learn a
+				 * new mode.
+				 */
+				ost->ost_ask = 0;
+				ost->ost_answer = 0;
+				break;
+
+			case 'P':
+				tools_progress_enable();
 				break;
 
 			case 'y':
@@ -717,12 +793,25 @@ int main(int argc, char **argv)
 				sb_num = read_number(optarg);
 				break;
 
+			case 't':
+				if (ost->ost_show_stats)
+					ost->ost_show_extended_stats = 1;
+				ost->ost_show_stats = 1;
+				break;
+
 			default:
 				fsck_mask |= FSCK_USAGE;
 				print_usage();
 				goto out;
 				break;
 		}
+	}
+
+	if (!(open_flags & OCFS2_FLAG_RW) && ost->ost_compress_dirs) {
+		fprintf(stderr, "Compress directories (-D) incompatible with read-only mode\n");
+		fsck_mask |= FSCK_USAGE;
+		print_usage();
+		goto out;
 	}
 
 	if (blksize % OCFS2_MIN_BLOCKSIZE) {
@@ -817,7 +906,9 @@ int main(int argc, char **argv)
 
 		block_signals(SIG_BLOCK);
 		ret = ocfs2_initialize_dlm(ost->ost_fs, whoami);
-		if (ret == O2CB_ET_INVALID_STACK_NAME) {
+		if (ret == O2CB_ET_INVALID_STACK_NAME ||
+		    ret == O2CB_ET_INVALID_CLUSTER_NAME ||
+		    ret == O2CB_ET_INVALID_HEARTBEAT_MODE) {
 			block_signals(SIG_UNBLOCK);
 			ret = recover_cluster_info(ost);
 			if (ret) {
@@ -942,13 +1033,22 @@ int main(int argc, char **argv)
 		goto done;
 	}
 
+	ret = o2fsck_pass5(ost);
+	if (ret) {
+		com_err(whoami, ret, "while performing pass 5");
+		goto done;
+	}
+
 done:
 	if (ret)
 		fsck_mask |= FSCK_ERROR;
 	else {
 		fsck_mask = FSCK_OK;
 		ost->ost_saw_error = 0;
-		printf("All passes succeeded.\n");
+		printf("All passes succeeded.\n\n");
+		o2fsck_print_resource_track(NULL, ost, &ost->ost_rt,
+					    ost->ost_fs->fs_io);
+		show_stats(ost);
 	}
 
 clear_dirty_flag:

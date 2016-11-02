@@ -31,11 +31,8 @@
 
 #include "ocfs2/byteorder.h"
 
-void ocfs2_swap_group_desc(struct ocfs2_group_desc *gd)
+static void ocfs2_swap_group_desc_header(struct ocfs2_group_desc *gd)
 {
-	if (cpu_is_little_endian)
-		return;
-
 	gd->bg_size = bswap_16(gd->bg_size);
 	gd->bg_bits = bswap_16(gd->bg_bits);
 	gd->bg_free_bits_count = bswap_16(gd->bg_free_bits_count);
@@ -44,6 +41,30 @@ void ocfs2_swap_group_desc(struct ocfs2_group_desc *gd)
 	gd->bg_next_group = bswap_64(gd->bg_next_group);
 	gd->bg_parent_dinode = bswap_64(gd->bg_parent_dinode);
 	gd->bg_blkno = bswap_64(gd->bg_blkno);
+}
+
+void ocfs2_swap_group_desc_from_cpu(ocfs2_filesys *fs,
+				    struct ocfs2_group_desc *gd)
+{
+	if (cpu_is_little_endian)
+		return;
+
+	if (ocfs2_gd_is_discontig(gd))
+		ocfs2_swap_extent_list_from_cpu(fs, gd, &gd->bg_list);
+
+	ocfs2_swap_group_desc_header(gd);
+}
+
+void ocfs2_swap_group_desc_to_cpu(ocfs2_filesys *fs,
+				  struct ocfs2_group_desc *gd)
+{
+	if (cpu_is_little_endian)
+		return;
+
+	ocfs2_swap_group_desc_header(gd);
+
+	if (ocfs2_gd_is_discontig(gd))
+		ocfs2_swap_extent_list_to_cpu(fs, gd, &gd->bg_list);
 }
 
 errcode_t ocfs2_read_group_desc(ocfs2_filesys *fs, uint64_t blkno,
@@ -79,7 +100,7 @@ errcode_t ocfs2_read_group_desc(ocfs2_filesys *fs, uint64_t blkno,
 	memcpy(gd_buf, blk, fs->fs_blocksize);
 
 	gd = (struct ocfs2_group_desc *)gd_buf;
-	ocfs2_swap_group_desc(gd);
+	ocfs2_swap_group_desc_to_cpu(fs, gd);
 
 	ret = 0;
 out:
@@ -109,7 +130,7 @@ errcode_t ocfs2_write_group_desc(ocfs2_filesys *fs, uint64_t blkno,
 	memcpy(blk, gd_buf, fs->fs_blocksize);
 
 	gd = (struct ocfs2_group_desc *)blk;
-	ocfs2_swap_group_desc(gd);
+	ocfs2_swap_group_desc_from_cpu(fs, gd);
 
 	ocfs2_compute_meta_ecc(fs, blk, &gd->bg_check);
 	ret = io_write_block(fs->fs_io, blkno, 1, blk);
@@ -254,6 +275,121 @@ out_buf:
 	return ret;
 }
 
+uint64_t ocfs2_get_block_from_group(ocfs2_filesys *fs,
+				    struct ocfs2_group_desc *grp,
+				    int bpc, int bit_offset)
+{
+	int cpos, i;
+	struct ocfs2_extent_rec *rec = NULL;
+	int block_per_bit = ocfs2_clusters_to_blocks(fs, 1) / bpc;
+
+	if (!ocfs2_gd_is_discontig(grp))
+		return grp->bg_blkno + bit_offset * block_per_bit;
+
+	/* handle discontiguous group. */
+	cpos = bit_offset / bpc;
+	for (i = 0; i < grp->bg_list.l_next_free_rec; i++) {
+		rec = &grp->bg_list.l_recs[i];
+
+		if (rec->e_cpos <= cpos &&
+		    rec->e_cpos + rec->e_leaf_clusters > cpos)
+			break;
+	}
+
+	if (!rec || i == grp->bg_list.l_next_free_rec)
+		abort();
+
+	return rec->e_blkno + (bit_offset * block_per_bit -
+		ocfs2_clusters_to_blocks(fs, rec->e_cpos));
+}
+
+errcode_t ocfs2_cache_chain_allocator_blocks(ocfs2_filesys *fs,
+					     struct ocfs2_dinode *di)
+{
+	struct io_vec_unit *ivus = NULL;
+	char *buf = NULL;
+	errcode_t ret = 0;
+	int i, j, count;
+	struct ocfs2_chain_list *cl;
+	struct ocfs2_chain_rec *cr;
+	struct ocfs2_group_desc *gd;
+	io_channel *channel = fs->fs_io;
+	int blocksize = fs->fs_blocksize;
+	int64_t group_size;
+
+	if (!(di->i_flags & OCFS2_CHAIN_FL)) {
+		ret = OCFS2_ET_INODE_NOT_VALID;
+		goto out;
+	}
+
+	if (!channel)
+		goto out;
+
+	if (!di->i_clusters)
+		goto out;
+
+	group_size = (int64_t)di->i_clusters / di->id2.i_chain.cl_cpg;
+	group_size *= blocksize;
+
+	if (group_size > io_get_cache_size(channel))
+		goto out;
+
+	cl = &(di->id2.i_chain);
+	count = cl->cl_next_free_rec;
+
+	ret = ocfs2_malloc_blocks(channel, count, &buf);
+	if (ret)
+		goto out;
+	memset(buf, 0, count * blocksize);
+
+	ret = ocfs2_malloc(sizeof(struct io_vec_unit) * count, &ivus);
+	if (ret)
+		goto out;
+
+	for (i = 0; i < count; ++i) {
+		cr = &(cl->cl_recs[i]);
+		ivus[i].ivu_blkno = cr->c_blkno;
+		ivus[i].ivu_buf = buf + (i * blocksize);
+		ivus[i].ivu_buflen = blocksize;
+	}
+
+	while (count) {
+		ret = io_vec_read_blocks(channel, ivus, count);
+		if (ret)
+			goto out;
+
+		for (i = 0, j = 0; i < count; ++i) {
+			gd = (struct ocfs2_group_desc *)ivus[i].ivu_buf;
+
+			ret = ocfs2_validate_meta_ecc(fs, ivus[i].ivu_buf,
+						      &gd->bg_check);
+			if (ret)
+				goto out;
+
+			if (memcmp(gd->bg_signature, OCFS2_GROUP_DESC_SIGNATURE,
+				   strlen(OCFS2_GROUP_DESC_SIGNATURE))) {
+				ret = OCFS2_ET_BAD_GROUP_DESC_MAGIC;
+				goto out;
+			}
+			ocfs2_swap_group_desc_to_cpu(fs, gd);
+
+			if ((gd->bg_next_group > OCFS2_SUPER_BLOCK_BLKNO) &&
+			    (gd->bg_next_group < fs->fs_blocks)) {
+				ivus[j].ivu_blkno = gd->bg_next_group;
+				memset(ivus[j].ivu_buf, 0, blocksize);
+				ivus[j].ivu_buflen = blocksize;
+				j++;
+			}
+		}
+
+		count = j;
+	}
+
+out:
+	ocfs2_free(&ivus);
+	ocfs2_free(&buf);
+	return ret;
+}
 
 #ifdef DEBUG_EXE
 #include <stdlib.h>

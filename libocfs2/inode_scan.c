@@ -6,7 +6,7 @@
  * Scan all inodes in an OCFS2 filesystem.  For the OCFS2 userspace
  * library.
  *
- * Copyright (C) 2004 Oracle.  All rights reserved.
+ * Copyright (C) 2004, 2011 Oracle.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -17,11 +17,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  * 
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
- *
  * Ideas taken from e2fsprogs/lib/ext2fs/inode_scan.c
  *   Copyright (C) 1993, 1994, 1995, 1996, 1997 Theodore Ts'o.
  */
@@ -53,7 +48,8 @@ struct _ocfs2_inode_scan {
 	int buffer_blocks;
 	int blocks_in_buffer;
 	unsigned int blocks_left;
-	uint64_t bpos;
+	uint64_t b_offset;		/* bit offset in the group bitmap. */
+	uint16_t cur_discontig_rec;	/* Only valid in discontig group. */
 };
 
 
@@ -67,7 +63,7 @@ static errcode_t get_next_group(ocfs2_inode_scan *scan)
 	errcode_t ret;
 
 	if (!scan->cur_desc) {
-		if (scan->bpos)
+		if (scan->b_offset)
 			abort();
 
 		ret = ocfs2_malloc_block(scan->fs->fs_io,
@@ -76,7 +72,7 @@ static errcode_t get_next_group(ocfs2_inode_scan *scan)
 			return ret;
 	}
 
-	if (scan->bpos)
+	if (scan->b_offset)
 		scan->cur_blkno = scan->cur_desc->bg_next_group;
 
 	/*
@@ -98,7 +94,8 @@ static errcode_t get_next_group(ocfs2_inode_scan *scan)
 	scan->cur_blkno++;
 	scan->count++;
 	scan->blocks_left--;
-	scan->bpos = scan->cur_blkno;
+	scan->b_offset = 1;
+	scan->cur_discontig_rec = 0;
 
 	return 0;
 }
@@ -130,10 +127,57 @@ static errcode_t get_next_chain(ocfs2_inode_scan *scan)
 	scan->cur_rec = &di->id2.i_chain.cl_recs[scan->next_rec];
 	scan->next_rec++;
 	scan->count = 0;
-	scan->bpos = 0;
+	scan->b_offset = 0;
 	scan->cur_blkno = scan->cur_rec->c_blkno;
 
 	return 0;
+}
+
+/*
+ * Get the number of blocks we will read next.
+ * In case of discontiguous group, we will set scan->cur_blkno in case
+ * we need to read next extent record.
+ */
+static int get_next_read_blocks(ocfs2_inode_scan *scan)
+{
+	int num_blocks, rec_end;
+	struct ocfs2_extent_rec *rec;
+
+	if (!scan->cur_desc)
+		abort();
+
+	if (!scan->cur_desc->bg_list.l_next_free_rec) {
+		/* Contiguous group. Just set num_blocks. */
+		num_blocks = scan->cur_desc->bg_bits - scan->b_offset;
+		goto out;
+	}
+
+	/* We shouldn't arrived here. */
+	if (scan->cur_discontig_rec == scan->cur_desc->bg_list.l_next_free_rec)
+		abort();
+
+	rec = &scan->cur_desc->bg_list.l_recs[scan->cur_discontig_rec];
+	rec_end = ocfs2_clusters_to_blocks(scan->fs,
+					   rec->e_cpos + rec->e_leaf_clusters);
+	if (rec_end < scan->b_offset)
+		abort();
+	else if (rec_end > scan->b_offset) {
+		/* OK, we have more blocks to read in this rec. */
+		num_blocks = rec_end - scan->b_offset;
+	} else {
+		/* We have to read the next rec now. */
+		scan->cur_discontig_rec++;
+		rec = &scan->cur_desc->bg_list.l_recs[scan->cur_discontig_rec];
+		scan->cur_blkno = rec->e_blkno;
+		num_blocks = ocfs2_clusters_to_blocks(scan->fs,
+						      rec->e_leaf_clusters);
+	}
+
+out:
+	if (num_blocks > scan->buffer_blocks)
+		num_blocks = scan->buffer_blocks;
+
+	return num_blocks;
 }
 
 /*
@@ -151,8 +195,7 @@ static errcode_t fill_group_buffer(ocfs2_inode_scan *scan)
 	if (scan->cur_rec && (scan->count > scan->cur_rec->c_total))
 		abort();
 
-	if (scan->cur_rec && (scan->bpos > (scan->cur_desc->bg_blkno +
-			  scan->cur_desc->bg_bits)))
+	if (scan->cur_rec && (scan->b_offset > scan->cur_desc->bg_bits))
 		abort();
 
 	if (!scan->cur_rec || (scan->count == scan->cur_rec->c_total)) {
@@ -161,26 +204,20 @@ static errcode_t fill_group_buffer(ocfs2_inode_scan *scan)
 			return ret;
 	}
 	
-	if (!scan->bpos || (scan->bpos == (scan->cur_desc->bg_blkno +
-					   scan->cur_desc->bg_bits))) {
+	if (!scan->b_offset || (scan->b_offset == scan->cur_desc->bg_bits)) {
 		ret = get_next_group(scan);
 		if (ret)
 			return ret;
 	}
 
-
-	num_blocks = (scan->cur_desc->bg_blkno +
-		      scan->cur_desc->bg_bits) - scan->bpos;
-
-	if (num_blocks > scan->buffer_blocks)
-		num_blocks = scan->buffer_blocks;
+	num_blocks = get_next_read_blocks(scan);
 
 	ret = ocfs2_read_blocks(scan->fs, scan->cur_blkno, num_blocks,
 				scan->group_buffer);
 	if (ret)
 		return ret;
 
-	scan->bpos += num_blocks;
+	scan->b_offset += num_blocks;
 	scan->blocks_in_buffer = num_blocks;
 	scan->cur_block = scan->group_buffer;
 
@@ -214,6 +251,27 @@ static int get_next_inode_alloc(ocfs2_inode_scan *scan)
 		cinode->ci_inode->id1.bitmap1.i_total;
 
 	return 0;
+}
+
+uint64_t ocfs2_get_max_inode_count(ocfs2_inode_scan *scan)
+{
+	struct ocfs2_dinode *di = NULL;
+	uint64_t count = 0;
+	int i;
+
+	if (!scan || !scan->num_inode_alloc)
+		return 0;
+
+	for (i = 0; i < scan->num_inode_alloc; i++) {
+		if (scan->inode_alloc[i])
+			di = scan->inode_alloc[i]->ci_inode;
+		if (!di)
+			continue;
+		count += ocfs2_clusters_to_blocks(scan->fs, di->i_clusters);
+		di = NULL;
+	}
+
+	return count;
 }
 
 errcode_t ocfs2_get_next_inode(ocfs2_inode_scan *scan,
@@ -273,17 +331,13 @@ errcode_t ocfs2_open_inode_scan(ocfs2_filesys *fs,
 	if (ret)
 		goto out_scan;
 
-	/* Minimum 8 inodes in the buffer */
-	scan->buffer_blocks = fs->fs_clustersize / fs->fs_blocksize;
-	if (scan->buffer_blocks < 8) {
-		scan->buffer_blocks =
-			((8 * fs->fs_blocksize) +
-			 (fs->fs_clustersize - 1)) /
-			fs->fs_clustersize;
-		scan->buffer_blocks =
-			ocfs2_clusters_to_blocks(fs,
-						 scan->buffer_blocks);
-	}
+	/*
+	 * Ideally the buffer size should be one cpg. But finding that value
+	 * is not worth the effort. Instead we default to 4MB, which is a
+	 * typical value in most ocfs2 file systems.
+	 */
+#define OPEN_SCAN_BUFFER_SIZE	(4 * 1024 * 1024)
+	scan->buffer_blocks = OPEN_SCAN_BUFFER_SIZE / fs->fs_blocksize;
 
 	ret = ocfs2_malloc_blocks(fs->fs_io, scan->buffer_blocks,
 				  &scan->group_buffer);

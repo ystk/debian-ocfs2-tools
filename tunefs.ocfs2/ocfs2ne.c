@@ -94,10 +94,14 @@ extern struct tunefs_operation reset_uuid_op;
 extern struct tunefs_operation features_op;
 extern struct tunefs_operation resize_volume_op;
 extern struct tunefs_operation set_journal_size_op;
+extern struct tunefs_operation set_journal_block32_op;
+extern struct tunefs_operation set_journal_block64_op;
 extern struct tunefs_operation set_label_op;
 extern struct tunefs_operation set_slot_count_op;
 extern struct tunefs_operation update_cluster_stack_op;
 extern struct tunefs_operation cloned_volume_op;
+extern struct tunefs_operation set_usrquota_sync_interval_op;
+extern struct tunefs_operation set_grpquota_sync_interval_op;
 
 /* List of operations we're going to run */
 static LIST_HEAD(tunefs_run_list);
@@ -113,9 +117,37 @@ static struct tunefs_journal_option set_journal_size_option = {
 	.jo_op		= &set_journal_size_op,
 };
 
+static struct tunefs_journal_option set_journal_block64_option = {
+	.jo_name        = "block64",
+	.jo_help        = "block64",
+	.jo_op          = &set_journal_block64_op,
+};
+
+static struct tunefs_journal_option set_journal_block32_option = {
+	.jo_name        = "block32",
+	.jo_help        = "block32",
+	.jo_op          = &set_journal_block32_op,
+};
+
+static struct tunefs_journal_option set_journal_noblock64_option = {
+	.jo_name        = "noblock64",
+	.jo_help        = "noblock64",
+	.jo_op          = &set_journal_block32_op,
+};
+
+static struct tunefs_journal_option set_journal_noblock32_option = {
+	.jo_name        = "noblock32",
+	.jo_help        = "noblock32",
+	.jo_op          = &set_journal_block64_op,
+};
+
 /* The list of all supported journal options */
 static struct tunefs_journal_option *tunefs_journal_options[] = {
 	&set_journal_size_option,
+	&set_journal_block64_option,
+	&set_journal_block32_option,
+	&set_journal_noblock64_option,
+	&set_journal_noblock32_option,
 	NULL,
 };
 
@@ -488,10 +520,12 @@ static struct tunefs_option list_sparse_option = {
 
 static struct tunefs_option reset_uuid_option = {
 	.opt_option	= {
-		.name	= "uuid-reset",
-		.val	= 'U',
+		.name		= "uuid-reset",
+		.val		= 'U',
+		.has_arg	= 2,
 	},
-	.opt_help	= "-U|--uuid-reset",
+	.opt_help	= "-U|--uuid-reset[=new-uuid]",
+	.opt_handle	= &generic_handle_arg,
 	.opt_op		= &reset_uuid_op,
 };
 
@@ -583,6 +617,28 @@ static struct tunefs_option journal_option = {
 	.opt_handle	= handle_journal_arg,
 };
 
+static struct tunefs_option set_usrquota_sync_interval_option = {
+	.opt_option	= {
+		.name		= "usrquota-sync-interval",
+		.val		= 256,
+		.has_arg	= 1,
+	},
+	.opt_help	= "   --usrquota-sync-interval <interval>",
+	.opt_handle	= generic_handle_arg,
+	.opt_op		= &set_usrquota_sync_interval_op,
+};
+
+static struct tunefs_option set_grpquota_sync_interval_option = {
+	.opt_option	= {
+		.name		= "grpquota-sync-interval",
+		.val		= 257,
+		.has_arg	= 1,
+	},
+	.opt_help	= "   --grpquota-sync-interval <interval>",
+	.opt_handle	= generic_handle_arg,
+	.opt_op		= &set_grpquota_sync_interval_op,
+};
+
 /* The order here creates the order in print_usage() */
 static struct tunefs_option *options[] = {
 	&help_option,
@@ -603,6 +659,8 @@ static struct tunefs_option *options[] = {
 	&features_option,
 	&update_cluster_stack_option,
 	&cloned_volume_option,
+	&set_usrquota_sync_interval_option,
+	&set_grpquota_sync_interval_option,
 	&yes_option,
 	&no_option,
 	NULL,
@@ -852,7 +910,6 @@ static errcode_t parse_options(int argc, char *argv[], char **device)
 	int c;
 	errcode_t err;
 	struct option *long_options = NULL;
-	char error[PATH_MAX];
 	char *optstring = NULL;
 	struct tunefs_option *opt;
 
@@ -861,7 +918,6 @@ static errcode_t parse_options(int argc, char *argv[], char **device)
 		goto out;
 
 	opterr = 0;
-	error[0] = '\0';
 	while ((c = getopt_long(argc, argv, optstring,
 				long_options, NULL)) != EOF) {
 		opt = NULL;

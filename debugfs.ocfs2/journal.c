@@ -27,16 +27,14 @@
 
 #include "main.h"
 
-extern dbgfs_gbls gbls;
-
-static enum dump_block_type detect_block (char *buf);
+extern struct dbgfs_gbls gbls;
 
 static void scan_journal(FILE *out, journal_superblock_t *jsb, char *buf,
 			 int len, uint64_t *blocknum, uint64_t *last_unknown)
 {
 	char *block;
 	char *p;
-	enum dump_block_type type;
+	enum ocfs2_block_type type;
 	journal_header_t *header;
 
 	p = buf;
@@ -51,8 +49,8 @@ static void scan_journal(FILE *out, journal_superblock_t *jsb, char *buf,
 			}
 			dump_jbd_block(out, jsb, header, *blocknum);
 		} else {
-			type = detect_block(block);
-			if (type == DUMP_BLOCK_UNKNOWN) {
+			type = ocfs2_detect_block(block);
+			if (type == OCFS2_BLOCK_UNKNOWN) {
 				if (*last_unknown == 0)
 					*last_unknown = *blocknum;
 			} else {
@@ -157,46 +155,3 @@ bail:
 	return ret;
 }
 
-/*
- * detect_block()
- *
- */
-static enum dump_block_type detect_block (char *buf)
-{
-	struct ocfs2_dinode *inode;
-	struct ocfs2_extent_block *extent;
-	struct ocfs2_group_desc *group;
-	struct ocfs2_dir_block_trailer *trailer;
-	enum dump_block_type ret = DUMP_BLOCK_UNKNOWN;
-
-	inode = (struct ocfs2_dinode *)buf;
-	if (!strncmp((char *)inode->i_signature, OCFS2_INODE_SIGNATURE,
-		     sizeof(inode->i_signature))) {
-		ret = DUMP_BLOCK_INODE;
-		goto bail;
-	}
-
-	extent = (struct ocfs2_extent_block *)buf;
-	if (!strncmp((char *)extent->h_signature, OCFS2_EXTENT_BLOCK_SIGNATURE,
-		     sizeof(extent->h_signature))) {
-		ret = DUMP_BLOCK_EXTENT_BLOCK;
-		goto bail;
-	}
-
-	group = (struct ocfs2_group_desc *)buf;
-	if (!strncmp((char *)group->bg_signature, OCFS2_GROUP_DESC_SIGNATURE,
-		     sizeof(group->bg_signature))) {
-		ret = DUMP_BLOCK_GROUP_DESCRIPTOR;
-		goto bail;
-	}
-
-	trailer = ocfs2_dir_trailer_from_block(gbls.fs, buf);
-	if (!strncmp((char *)trailer->db_signature, OCFS2_DIR_TRAILER_SIGNATURE,
-		     sizeof(trailer->db_signature))) {
-		ret = DUMP_BLOCK_DIR_BLOCK;
-		goto bail;
-	}
-
-bail:
-	return ret;
-}				/* detect_block */

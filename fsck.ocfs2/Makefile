@@ -14,6 +14,14 @@ LIBO2DLM_LIBS = -L$(TOPDIR)/libo2dlm -lo2dlm $(DL_LIBS)
 LIBO2DLM_DEPS = $(TOPDIR)/libo2dlm/libo2dlm.a
 LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb
 LIBO2CB_DEPS = $(TOPDIR)/libo2cb/libo2cb.a
+ifneq ($(BUILD_FSDLM_SUPPORT),)
+LIBO2CB_LIBS += -ldlm_lt
+endif
+ifneq ($(BUILD_CMAP_SUPPORT),)
+LIBO2CB_LIBS += -lcmap
+endif
+LIBTOOLS_INTERNAL_LIBS = -L$(TOPDIR)/libtools-internal -ltools-internal
+LIBTOOLS_INTERNAL_DEPS = $(TOPDIR)/libtools-internal/libtools-internal.a
 
 ifndef OCFS2_DYNAMIC_FSCK
 LDFLAGS += -static
@@ -31,7 +39,9 @@ CFILES =	fsck.c		\
 		pass2.c 	\
 		pass3.c 	\
 		pass4.c 	\
+		pass5.c		\
 		problem.c 	\
+		refcount.c	\
 		slot_recovery.c \
 		strings.c 	\
 		util.c		\
@@ -50,7 +60,9 @@ HFILES = 	include/fsck.h		\
 		include/pass2.h		\
 		include/pass3.h		\
 		include/pass4.h		\
+		include/pass5.h		\
 		include/problem.h	\
+		include/refcount.h	\
 		include/slot_recovery.h	\
 		include/strings.h	\
 		include/util.h
@@ -65,8 +77,8 @@ DIST_RULES = dist-subdircreate
 dist-subdircreate:
 	$(TOPDIR)/mkinstalldirs $(DIST_DIR)/include
 
-fsck.ocfs2: $(OBJS) $(LIBOCFS2_DEPS) $(LIBO2DLM_DEPS) $(LIBO2CB_DEPS)
-	$(LINK) $(LIBOCFS2_LIBS) $(LIBO2DLM_LIBS) $(LIBO2CB_LIBS) $(COM_ERR_LIBS)
+fsck.ocfs2: $(OBJS) $(LIBOCFS2_DEPS) $(LIBO2DLM_DEPS) $(LIBO2CB_DEPS) $(LIBTOOLS_INTERNAL_DEPS)
+	$(LINK) $(LIBOCFS2_LIBS) $(LIBO2DLM_LIBS) $(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS) $(AIO_LIBS)
 
 $(OBJS): prompt-codes.h
 

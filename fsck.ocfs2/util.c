@@ -31,7 +31,10 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include "ocfs2/ocfs2.h"
+
 
 #include "util.h"
 
@@ -193,6 +196,144 @@ bail:
 	return ret;
 }
 
+void o2fsck_init_resource_track(struct o2fsck_resource_track *rt,
+				io_channel *channel)
+{
+	struct rusage r;
+
+	gettimeofday(&rt->rt_real_time, 0);
+
+	io_get_stats(channel, &rt->rt_io_stats);
+
+	memset(&r, 0, sizeof(struct rusage));
+	getrusage(RUSAGE_SELF, &r);
+	rt->rt_user_time = r.ru_utime;
+	rt->rt_sys_time = r.ru_stime;
+}
+
+static inline float timeval_in_secs(struct timeval *tv)
+{
+	return tv->tv_sec + ((float)(tv->tv_usec) / 1000000);
+}
+
+static inline void diff_timeval(struct timeval *tv1, struct timeval *tv2)
+{
+	tv1->tv_sec -=  tv2->tv_sec;
+	if (tv1->tv_usec < tv2->tv_usec) {
+		tv1->tv_usec = 1000000 - tv2->tv_usec + tv1->tv_usec;
+		tv1->tv_sec--;
+	} else
+		tv1->tv_usec -= tv2->tv_usec;
+}
+
+static inline void add_timeval(struct timeval *tv1, struct timeval *tv2)
+{
+	tv1->tv_sec +=  tv2->tv_sec;
+	tv1->tv_usec += tv2->tv_usec;
+	if (tv1->tv_usec > 1000000) {
+		tv1->tv_sec++;
+		tv1->tv_usec -= 1000000;
+	}
+}
+
+void o2fsck_add_resource_track(struct o2fsck_resource_track *rt1,
+			       struct o2fsck_resource_track *rt2)
+{
+	struct ocfs2_io_stats *io1 = &rt1->rt_io_stats;
+	struct ocfs2_io_stats *io2 = &rt2->rt_io_stats;
+
+	add_timeval(&rt1->rt_real_time, &rt2->rt_real_time);
+	add_timeval(&rt1->rt_user_time, &rt2->rt_user_time);
+	add_timeval(&rt1->rt_sys_time, &rt2->rt_sys_time);
+
+	io1->is_bytes_read += io2->is_bytes_read;
+	io1->is_bytes_written += io2->is_bytes_written;
+	io1->is_cache_hits += io2->is_cache_hits;
+	io1->is_cache_misses += io2->is_cache_misses;
+	io1->is_cache_inserts += io2->is_cache_inserts;
+	io1->is_cache_removes += io2->is_cache_removes;
+
+}
+
+void o2fsck_compute_resource_track(struct o2fsck_resource_track *rt,
+				   io_channel *channel)
+{
+	struct rusage r;
+	struct timeval time_end;
+	struct ocfs2_io_stats _ios, *ios = &_ios;
+	struct ocfs2_io_stats *rtio = &rt->rt_io_stats;
+
+	getrusage(RUSAGE_SELF, &r);
+	gettimeofday(&time_end, 0);
+
+	diff_timeval(&r.ru_utime, &rt->rt_user_time);
+	diff_timeval(&r.ru_stime, &rt->rt_sys_time);
+	diff_timeval(&time_end, &rt->rt_real_time);
+
+	memcpy(&rt->rt_user_time, &r.ru_utime, sizeof(struct timeval));
+	memcpy(&rt->rt_sys_time, &r.ru_stime, sizeof(struct timeval));
+	memcpy(&rt->rt_real_time, &time_end, sizeof(struct timeval));
+
+	io_get_stats(channel, ios);
+
+	rtio->is_bytes_read = ios->is_bytes_read - rtio->is_bytes_read;
+	rtio->is_bytes_written = ios->is_bytes_written - rtio->is_bytes_written;
+	rtio->is_cache_hits = ios->is_cache_hits - rtio->is_cache_hits;
+	rtio->is_cache_misses = ios->is_cache_misses - rtio->is_cache_misses;
+	rtio->is_cache_inserts = ios->is_cache_inserts - rtio->is_cache_inserts;
+	rtio->is_cache_removes = ios->is_cache_removes - rtio->is_cache_removes;
+}
+
+void o2fsck_print_resource_track(char *pass, o2fsck_state *ost,
+				 struct o2fsck_resource_track *rt,
+				 io_channel *channel)
+{
+	struct ocfs2_io_stats *rtio = &rt->rt_io_stats;
+	uint64_t total_io, cache_read;
+	float rtime_s, utime_s, stime_s, walltime;
+	uint32_t rtime_m, utime_m, stime_m;
+
+	if (!ost->ost_show_stats)
+		return ;
+
+	if (pass && !ost->ost_show_extended_stats)
+		return;
+
+#define split_time(_t, _m, _s)			\
+	do {					\
+		(_s) = timeval_in_secs(&_t);	\
+		(_m) = (_s) / 60;		\
+		(_s) -= ((_m) * 60);		\
+	} while (0);
+
+	split_time(rt->rt_real_time, rtime_m, rtime_s);
+	split_time(rt->rt_user_time, utime_m, utime_s);
+	split_time(rt->rt_sys_time, stime_m, stime_s);
+
+	walltime = timeval_in_secs(&rt->rt_real_time) -
+		timeval_in_secs(&rt->rt_user_time);
+
+	/* TODO: Investigate why user time is sometimes > wall time*/
+	if (walltime < 0)
+		walltime = 0;
+
+	cache_read = (uint64_t)rtio->is_cache_hits * io_get_blksize(channel);
+	total_io = rtio->is_bytes_read + rtio->is_bytes_written;
+
+	if (!pass)
+		printf("  Cache size: %luMB\n",
+		       mbytes(io_get_cache_size(channel)));
+
+	printf("  I/O read disk/cache: %"PRIu64"MB / %"PRIu64"MB, "
+	       "write: %"PRIu64"MB, rate: %.2fMB/s\n",
+	       mbytes(rtio->is_bytes_read),
+	       mbytes(cache_read), mbytes(rtio->is_bytes_written),
+	       (double)(mbytes(total_io) / walltime));
+
+	printf("  Times real: %dm%.3fs, user: %dm%.3fs, sys: %dm%.3fs\n",
+	       rtime_m, rtime_s, utime_m, utime_s, stime_m, stime_s);
+}
+
 /* Number of blocks available in the I/O cache */
 static int cache_blocks;
 /*
@@ -205,10 +346,11 @@ static int blocks_cached;
 void o2fsck_init_cache(o2fsck_state *ost, enum o2fsck_cache_hint hint)
 {
 	errcode_t ret;
-	uint64_t blocks_wanted;
+	uint64_t blocks_wanted, av_blocks;
 	int leave_room;
 	ocfs2_filesys *fs = ost->ost_fs;
 	int max_slots = OCFS2_RAW_SB(fs->fs_super)->s_max_slots;
+	uint64_t pages_wanted, avpages;
 
 	switch (hint) {
 		case O2FSCK_CACHE_MODE_FULL:
@@ -221,8 +363,10 @@ void o2fsck_init_cache(o2fsck_state *ost, enum o2fsck_cache_hint hint)
 			 * data.  Let's guess at 256M journals.
 			 */
 			leave_room = 0;
-			blocks_wanted = ocfs2_blocks_in_bytes(fs,
-					max_slots * 1024 * 1024 * 256);
+
+			blocks_wanted = (uint64_t)max_slots * 1024 * 1024 * 256;
+			blocks_wanted = ocfs2_bytes_to_blocks(fs,
+							      blocks_wanted);
 			break;
 		case O2FSCK_CACHE_MODE_NONE:
 			return;
@@ -245,10 +389,19 @@ void o2fsck_init_cache(o2fsck_state *ost, enum o2fsck_cache_hint hint)
 	if (blocks_wanted > INT_MAX)
 		blocks_wanted = INT_MAX;
 
+	av_blocks = blocks_wanted;
+	avpages = sysconf(_SC_AVPHYS_PAGES);
+	pages_wanted = blocks_wanted * fs->fs_blocksize / getpagesize();
+	if (pages_wanted > avpages)
+		av_blocks = avpages * getpagesize() / fs->fs_blocksize;
+
 	while (blocks_wanted > 0) {
 		io_destroy_cache(fs->fs_io);
+
 		verbosef("Asking for %"PRIu64" blocks of I/O cache\n",
 			 blocks_wanted);
+		if (blocks_wanted > av_blocks)
+			blocks_wanted = av_blocks;
 		ret = io_init_cache(fs->fs_io, blocks_wanted);
 		if (!ret) {
 			/*
@@ -275,8 +428,7 @@ void o2fsck_init_cache(o2fsck_state *ost, enum o2fsck_cache_hint hint)
 				break;
 			}
 
-			verbosef("Leaving room for other %s\n",
-				 "allocations");
+			verbosef("Leaving room for other %s\n", "allocations");
 			leave_room = 0;
 		}
 

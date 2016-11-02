@@ -5,7 +5,7 @@
  *
  * Takes an inode block number and find all paths leading to it.
  *
- * Copyright (C) 2004, 2005 Oracle.  All rights reserved.
+ * Copyright (C) 2004, 2011 Oracle.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -38,11 +38,12 @@ struct walk_path {
 	uint64_t *inode;
 };
 
-static int walk_tree_func(struct ocfs2_dir_entry *dentry, int offset,
+static int walk_tree_func(struct ocfs2_dir_entry *dentry,
+			  uint64_t blocknr, int offset,
 			  int blocksize, char *buf, void *priv_data)
 {
 	errcode_t ret;
-	int len, oldval;
+	int len;
 	int reti = 0;
 	int i = 0;
 	int print = 0;
@@ -73,12 +74,10 @@ static int walk_tree_func(struct ocfs2_dir_entry *dentry, int offset,
 	if (dentry->file_type == OCFS2_FT_DIR)
 		path[len + dentry->name_len] = '/';
 
-	oldval = 0;
-
 	for (i = 0; i < wp->count; ++i) {
 		if (dentry->inode == wp->inode[i]) {
 			if (!print)
-				dump_inode_path (wp->out, dentry->inode, path);
+				dump_inode_path(wp->out, dentry->inode, path);
 			++wp->found;
 			++print;
 		}
@@ -129,13 +128,13 @@ errcode_t find_inode_paths(ocfs2_filesys *fs, char **args, int findall,
 	for (i = 0; i < count; ++i) {
 		if (blknos[i] == fs->fs_root_blkno) {
 			if (!printroot)
-				dump_inode_path (out, blknos[i], "/");
+				dump_inode_path(out, blknos[i], "/");
 			++wp.found;
 			++printroot;
 		}
 		if (blknos[i] == fs->fs_sysdir_blkno) {
 			if (!printsysd)
-				dump_inode_path (out, blknos[i], "//");
+				dump_inode_path(out, blknos[i], "//");
 			++wp.found;
 			++printsysd;
 		}

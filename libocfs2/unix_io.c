@@ -33,6 +33,7 @@
 #include <assert.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -40,6 +41,8 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
+#include <linux/fs.h>
+#include <libaio.h>
 #endif
 #include <sys/mman.h>
 #include <inttypes.h>
@@ -84,6 +87,13 @@ struct io_cache {
 	char *ic_data_buffer;
 	unsigned long ic_data_buffer_len;
 	int ic_locked;
+	int ic_use_count;
+
+	/* stats */
+	uint32_t ic_hits;
+	uint32_t ic_misses;
+	uint32_t ic_inserts;
+	uint32_t ic_removes;
 };
 
 struct _io_channel {
@@ -94,6 +104,10 @@ struct _io_channel {
 	int io_fd;
 	bool io_nocache;
 	struct io_cache *io_cache;
+
+	/* stats */
+	uint64_t io_bytes_read;
+	uint64_t io_bytes_written;
 };
 
 /*
@@ -104,6 +118,65 @@ static inline int one_meg_of_blocks(io_channel *channel)
 {
 	int count = ONE_MEGABYTE + channel->io_blksize - 1;
 	return count / channel->io_blksize;
+}
+
+static errcode_t unix_vec_read_blocks(io_channel *channel,
+				      struct io_vec_unit *ivus, int count)
+{
+	int i;
+	int ret;
+	io_context_t io_ctx;
+	struct iocb *iocb = NULL, **iocbs = NULL;
+	struct io_event *events = NULL;
+	int64_t offset;
+	int submitted, completed = 0;
+
+	ret = OCFS2_ET_NO_MEMORY;
+	iocb = malloc((sizeof(struct iocb) * count));
+	iocbs = malloc((sizeof(struct iocb *) * count));
+	events = malloc((sizeof(struct io_event) * count));
+	if (!iocb || !iocbs || !events)
+		goto out;
+
+	memset(&io_ctx, 0, sizeof(io_ctx));
+	ret = io_queue_init(count, &io_ctx);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < count; ++i) {
+		offset = ivus[i].ivu_blkno * channel->io_blksize;
+		io_prep_pread(&(iocb[i]), channel->io_fd, ivus[i].ivu_buf,
+			      ivus[i].ivu_buflen, offset);
+		iocbs[i] = &iocb[i];
+	}
+
+resubmit:
+	ret = io_submit(io_ctx, count - completed, &iocbs[completed]);
+	if (!ret && (count - completed))
+		ret = OCFS2_ET_SHORT_READ;
+	if (ret < 0)
+		goto out;
+	submitted = ret;
+
+	ret = io_getevents(io_ctx, submitted, submitted, events, NULL);
+	if (ret < 0)
+		goto out;
+
+	completed += submitted;
+	if (completed < count)
+		goto resubmit;
+
+out:
+	if (ret >= 0)
+		ret = 0;
+	if (!ret)
+		channel->io_bytes_read += (count * channel->io_blksize);
+	free(iocb);
+	free(iocbs);
+	free(events);
+	io_queue_release(io_ctx);
+
+	return ret;
 }
 
 static errcode_t unix_io_read_block(io_channel *channel, int64_t blkno,
@@ -140,6 +213,8 @@ out:
 		ret = OCFS2_ET_SHORT_READ;
 		memset(data + tot, 0, size - tot);
 	}
+
+	channel->io_bytes_read += tot;
 
 	return ret;
 }
@@ -178,6 +253,8 @@ out:
 		*completed = tot / channel->io_blksize;
 	if (!ret && (tot != size))
 		ret = OCFS2_ET_SHORT_WRITE;
+
+	channel->io_bytes_written += tot;
 
 	return ret;
 }
@@ -235,6 +312,7 @@ static void io_cache_insert(struct io_cache *ic,
 
 	rb_link_node(&insert_icb->icb_node, parent, p);
 	rb_insert_color(&insert_icb->icb_node, &ic->ic_lookup);
+	ic->ic_inserts++;
 }
 
 static void io_cache_seen(struct io_cache *ic, struct io_cache_block *icb)
@@ -275,8 +353,61 @@ static struct io_cache_block *io_cache_pop_lru(struct io_cache *ic)
 
 	icb = list_entry(ic->ic_lru.next, struct io_cache_block, icb_list);
 	io_cache_disconnect(ic, icb);
+	ic->ic_removes++;
 
 	return icb;
+}
+
+/*
+ * Unlike its sync counterpart, this function issues ios even for cached blocks.
+ */
+static errcode_t io_cache_vec_read_blocks(io_channel *channel,
+					  struct io_vec_unit *ivus,
+					  int count, bool nocache)
+{
+	struct io_cache *ic = channel->io_cache;
+	struct io_cache_block *icb;
+	errcode_t ret = 0;
+	int i, j, blksize = channel->io_blksize;
+	uint64_t blkno;
+	uint32_t numblks;
+	char *buf;
+
+	/*
+	 * Read all blocks. We could extend this to not issue ios for already
+	 * cached blocks. But is it worth the effort?
+	 */
+	ret = unix_vec_read_blocks(channel, ivus, count);
+	if (ret)
+		goto out;
+
+	/* refresh cache */
+	for (i = 0; i < count; i++) {
+		blkno = ivus[i].ivu_blkno;
+		numblks = ivus[i].ivu_buflen / blksize;
+		buf = ivus[i].ivu_buf;
+
+		for (j = 0; j < numblks; ++j, ++blkno, buf += blksize) {
+			icb = io_cache_lookup(ic, blkno);
+			if (!icb) {
+				if (nocache)
+					continue;
+				icb = io_cache_pop_lru(ic);
+				icb->icb_blkno = blkno;
+				io_cache_insert(ic, icb);
+			}
+
+			memcpy(icb->icb_buf, buf, blksize);
+
+			if (nocache)
+				io_cache_unsee(ic, icb);
+			else
+				io_cache_seen(ic, icb);
+		}
+	}
+
+out:
+	return ret;
 }
 
 /*
@@ -309,10 +440,12 @@ static errcode_t io_cache_read_blocks(io_channel *channel, int64_t blkno,
 		icb = io_cache_lookup(ic, blkno + good_blocks);
 		if (!icb)
 			break;
+		ic->ic_hits++;
 	}
 
 	/* Read any blocks not in the cache */
 	if (good_blocks < count) {
+		ic->ic_misses += (count - good_blocks);
 		ret = unix_io_read_block(channel, blkno + good_blocks,
 					 count - good_blocks,
 					 data + (channel->io_blksize *
@@ -479,7 +612,8 @@ static void io_free_cache(struct io_cache *ic)
 void io_destroy_cache(io_channel *channel)
 {
 	if (channel->io_cache) {
-		io_free_cache(channel->io_cache);
+		if (!--channel->io_cache->ic_use_count)
+			io_free_cache(channel->io_cache);
 		channel->io_cache = NULL;
 	}
 }
@@ -562,6 +696,7 @@ errcode_t io_init_cache(io_channel *channel, size_t nr_blocks)
 		list_add_tail(&icb_list[i].icb_list, &ic->ic_lru);
 	}
 
+	ic->ic_use_count = 1;
 	channel->io_cache = ic;
 
 out:
@@ -580,6 +715,23 @@ errcode_t io_init_cache_size(io_channel *channel, size_t bytes)
 	return io_init_cache(channel, blocks);
 }
 
+size_t io_get_cache_size(io_channel *channel)
+{
+	if (channel->io_cache)
+		return channel->io_cache->ic_data_buffer_len;
+	return 0;
+}
+
+errcode_t io_share_cache(io_channel *from, io_channel *to)
+{
+	if (!from->io_cache)
+		return OCFS2_ET_INTERNAL_FAILURE;
+	if (to->io_cache)
+		return OCFS2_ET_INTERNAL_FAILURE;
+	to->io_cache = from->io_cache;
+	from->io_cache->ic_use_count++;
+	return 0;
+}
 
 static errcode_t io_validate_o_direct(io_channel *channel)
 {
@@ -602,6 +754,17 @@ static errcode_t io_validate_o_direct(io_channel *channel)
 	}
 
 	return ret;
+}
+
+int io_is_device_readonly(io_channel *channel)
+{
+	errcode_t ret;
+	int dev_ro;
+
+	ret = ioctl(channel->io_fd, BLKROGET, &dev_ro);
+	if (ret >= 0 && dev_ro)
+		return 1;
+	return 0;
 }
 
 errcode_t io_open(const char *name, int flags, io_channel **channel)
@@ -744,6 +907,21 @@ int io_get_fd(io_channel *channel)
 	return channel->io_fd;
 }
 
+void io_get_stats(io_channel *channel, struct ocfs2_io_stats *stats)
+{
+	struct io_cache *ioc = channel->io_cache;
+
+	memset(stats, 0, sizeof(struct ocfs2_io_stats));
+	stats->is_bytes_read = channel->io_bytes_read;
+	stats->is_bytes_written = channel->io_bytes_written;
+	if (ioc) {
+		stats->is_cache_hits = ioc->ic_hits;
+		stats->is_cache_misses = ioc->ic_misses;
+		stats->is_cache_inserts = ioc->ic_inserts;
+		stats->is_cache_removes = ioc->ic_removes;
+	}
+}
+
 /*
  * If a channel is set to 'nocache', it will use the _nocache() functions
  * even if called via the regular functions.  This allows control of
@@ -754,6 +932,16 @@ int io_get_fd(io_channel *channel)
 void io_set_nocache(io_channel *channel, bool nocache)
 {
 	channel->io_nocache = nocache;
+}
+
+errcode_t io_vec_read_blocks(io_channel *channel, struct io_vec_unit *ivus,
+			     int count)
+{
+	if (channel->io_cache)
+		return io_cache_vec_read_blocks(channel, ivus, count,
+						channel->io_nocache);
+	else
+		return unix_vec_read_blocks(channel, ivus, count);
 }
 
 errcode_t io_read_block(io_channel *channel, int64_t blkno, int count,

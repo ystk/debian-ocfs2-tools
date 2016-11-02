@@ -25,26 +25,30 @@
 #ifndef __UTILS_H__
 #define __UTILS_H__
 
-typedef struct _rdump_opts {
+struct rdump_opts {
 	ocfs2_filesys *fs;
 	char *fullname;
 	char *buf;
 	int verbose;
-} rdump_opts;
+};
 
 struct strings {
 	char *s_str;
 	struct list_head s_list;
 };
 
-void get_incompat_flag(uint32_t flag, GString *str);
-void get_tunefs_flag(uint32_t incompat_flag, uint16_t flag, GString *str);
-void get_compat_flag(uint32_t flag, GString *str);
-void get_rocompat_flag(uint32_t flag, GString *str);
-void get_vote_flag (uint32_t flag, GString *str);
-void get_publish_flag (uint32_t flag, GString *str);
+void get_incompat_flag(struct ocfs2_super_block *sb, char *buf, size_t count);
+void get_tunefs_flag(struct ocfs2_super_block *sb, char *buf, size_t count);
+void get_compat_flag(struct ocfs2_super_block *sb, char *buf, size_t count);
+void get_rocompat_flag(struct ocfs2_super_block *sb, char *buf, size_t count);
+void get_cluster_info_flag(struct ocfs2_super_block *sb, char *buf,
+			   size_t count);
 void get_journal_block_type (uint32_t jtype, GString *str);
 void get_tag_flag (uint32_t flags, GString *str);
+void get_journal_compat_flag(uint32_t flags, char *buf, size_t count);
+void get_journal_incompat_flag(uint32_t flags, char *buf, size_t count);
+void get_journal_rocompat_flag(uint32_t flags, char *buf, size_t count);
+void ctime_nano(struct timespec *t, char *buf, int buflen);
 FILE *open_pager(int interactive);
 void close_pager(FILE *stream);
 int inodestr_to_inode(char *str, uint64_t *blkno);
@@ -60,6 +64,7 @@ errcode_t rdump_inode(ocfs2_filesys *fs, uint64_t blkno, const char *name,
 		      const char *dumproot, int verbose);
 void crunch_strsplit(char **args);
 void find_max_contig_free_bits(struct ocfs2_group_desc *gd, int *max_contig_free_bits);
+void print_contig_bits(FILE *out, struct ocfs2_group_desc *gd);
 
 errcode_t get_debugfs_path(char *debugfs_path, int len);
 errcode_t open_debugfs_file(const char *debugfs_path, const char *dirname,
@@ -69,5 +74,12 @@ void init_stringlist(struct list_head *strlist);
 void free_stringlist(struct list_head *strlist);
 errcode_t add_to_stringlist(char *str, struct list_head *strlist);
 int del_from_stringlist(char *str, struct list_head *strlist);
+
+errcode_t traverse_extents(ocfs2_filesys *fs, struct ocfs2_extent_list *el,
+			   FILE *out);
+errcode_t traverse_chains(ocfs2_filesys *fs, struct ocfs2_chain_list *cl,
+			  FILE *out);
+
+enum dump_block_type detect_block (char *buf);
 
 #endif		/* __UTILS_H__ */

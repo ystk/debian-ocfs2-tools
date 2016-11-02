@@ -48,6 +48,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <sys/times.h>
 
 #include "ocfs2/ocfs2.h"
 #include "ocfs2/bitops.h"
@@ -155,6 +156,197 @@ out:
 	return ret;
 }
 
+static void check_discontig_bg(o2fsck_state *ost, int cpg,
+			       struct ocfs2_group_desc *bg,
+			       int *changed, int *clear_ref)
+{
+	uint64_t blkno = bg->bg_blkno;
+	int next_free, i, total_clusters = 0;
+	int fix_pos = -1;
+	struct ocfs2_extent_rec *rec;
+
+	if (bg->bg_list.l_tree_depth &&
+	    prompt(ost, PY, PR_DISCONTIG_BG_DEPTH,
+		   "Discontiguous Group descriptor at block %"PRIu64" has "
+		   "a tree depth %u which is greater than 0. "
+		   "Change it to 0?", blkno, bg->bg_list.l_tree_depth)) {
+		bg->bg_list.l_tree_depth = 0;
+		*changed = 1;
+	}
+
+	if ((bg->bg_list.l_count >
+	     ocfs2_extent_recs_per_gd(ost->ost_fs->fs_blocksize)) &&
+	    prompt(ost, PY, PR_DISCONTIG_BG_COUNT,
+		   "Discontigous group descriptor at block %"PRIu64" has "
+		   "an extent count of %u, but discontiguous groups can "
+		   "only hold %u records.  Set it to %u?", blkno,
+		   bg->bg_list.l_count,
+		   ocfs2_extent_recs_per_gd(ost->ost_fs->fs_blocksize),
+		   ocfs2_extent_recs_per_gd(ost->ost_fs->fs_blocksize))) {
+		bg->bg_list.l_count =
+			ocfs2_extent_recs_per_gd(ost->ost_fs->fs_blocksize);
+		*changed = 1;
+	}
+
+	if (bg->bg_list.l_next_free_rec > bg->bg_list.l_count)
+		next_free = bg->bg_list.l_count;
+	else
+		next_free = bg->bg_list.l_next_free_rec;
+
+	for (i = 0; i < next_free; i++) {
+		rec = &bg->bg_list.l_recs[i];
+
+		/*
+		 * We treat e_blkno = 0 and e_leaf_cluster = 0 as the
+		 * end of the extent list so that we can find the proper
+		 * l_next_free_rec.
+		 */
+		if (!rec->e_blkno && !rec->e_leaf_clusters)
+			break;
+
+		if (ocfs2_block_out_of_range(ost->ost_fs, rec->e_blkno) ||
+		    ocfs2_block_out_of_range(ost->ost_fs, rec->e_blkno +
+			ocfs2_clusters_to_blocks(ost->ost_fs,
+						 rec->e_leaf_clusters) - 1)) {
+			if (prompt(ost, PY, PR_DISCONTIG_BG_REC_RANGE,
+				   "Discontiguous block group %"PRIu64" in "
+				   "chain %d of inode %"PRIu64" claims "
+				   "clusters which is out of range. "
+				   "Drop this group?",
+				   blkno, bg->bg_chain,
+				   (uint64_t)bg->bg_parent_dinode))
+				*clear_ref = 1;
+			goto out;
+		}
+
+		if (rec->e_leaf_clusters > cpg) {
+			if (fix_pos >= 0) {
+				if (prompt(ost, PY,
+					   PR_DISCONTIG_BG_CORRUPT_LEAVES,
+					   "Discontiguous block group %"PRIu64
+					   " in chain %d of inode %"PRIu64" "
+					   "has errors in more than one extent "
+					   "record.  Record %d claims %u "
+					   "clusters and record %d claims %u "
+					   "clusters, but a group does not "
+					   "contain more than %u clusters. "
+					   "Drop this group?", blkno,
+					   bg->bg_chain,
+					   (uint64_t)bg->bg_parent_dinode,
+					   fix_pos,
+					   bg->bg_list.l_recs[fix_pos].e_leaf_clusters,
+					   i, rec->e_leaf_clusters, cpg))
+					*clear_ref = 1;
+				goto out;
+			}
+			fix_pos = i;
+			continue;
+		}
+
+		if ((total_clusters + rec->e_leaf_clusters) > cpg) {
+			if (total_clusters == cpg) {
+				if (fix_pos >= 0) {
+					/*
+					 * We have to drop the group here since
+					 * both l_next_free_rec and a extent
+					 * record have errors.
+					 */
+					if (prompt(ost, PY,
+						   PR_DISCONTIG_BG_LIST_CORRUPT,
+						   "Discontiguous group "
+						   "descriptor at block "
+						   "%"PRIu64" claims to use %u "
+						   "extents but only has %u "
+						   "filled in.  The filled in "
+						   "records contain errors. "
+						   "Drop this group?",
+						   blkno,
+						   bg->bg_list.l_next_free_rec,
+						   i))
+						*clear_ref = 1;
+					goto out;
+				}
+
+				/*
+				 * break out here so that we can fix the
+				 * l_next_free_rec.
+				 */
+				break;
+			} else {
+				if (prompt(ost, PY, PR_DISCONTIG_BG_CLUSTERS,
+					   "Discontiguous group descriptor at "
+					   "block %"PRIu64" claims to have %u "
+					   "clusters but a group does not "
+					   "contain more than %u clusters. "
+					   "Drop the group?",
+					   blkno,
+					   total_clusters +
+					   rec->e_leaf_clusters, cpg))
+					*clear_ref = 1;
+				goto out;
+			}
+		} else
+			total_clusters += rec->e_leaf_clusters;
+	}
+
+	if (bg->bg_list.l_next_free_rec != i) {
+		/* Change l_next_free_rec since the extent list look sane. */
+		if (prompt(ost, PY,
+			   PR_DISCONTIG_BG_NEXT_FREE_REC,
+			   "Discontiguous group descriptor at "
+			   "block %"PRIu64" claims to use %u "
+			   "extents but only has %u filled in. "
+			   "The filled in records appear to "
+			   "be correct.  Set the used extent "
+			   "count to the number filled in?",
+			   blkno, bg->bg_list.l_next_free_rec,
+			   i)) {
+			bg->bg_list.l_next_free_rec = i;
+			*changed = 1;
+		}
+	}
+
+	if (fix_pos < 0 && total_clusters < cpg) {
+		if (prompt(ost, PY, PR_DISCONTIG_BG_LESS_CLUSTERS,
+			   "Discontiguous group descriptor at "
+			   "block %"PRIu64" claims to have %u "
+			   "clusters but a group does not "
+			   "contain less than %u clusters. "
+			   "Drop the group?",
+			   blkno, total_clusters, cpg))
+			*clear_ref = 1;
+		goto out;
+	}
+
+	if (fix_pos >= 0) {
+		rec = &bg->bg_list.l_recs[fix_pos];
+
+		if (total_clusters == cpg) {
+			if (prompt(ost, PY, PR_DISCONTIG_BG_REC_CORRUPT,
+				   "Extent record %d of discontiguous group "
+				   "descriptor at block %"PRIu64" claims %u "
+				   "clusters, but a group does not "
+				   "contain more than %u clusters. "
+				   "Drop the group?",
+				   fix_pos, blkno, rec->e_leaf_clusters, cpg))
+					*clear_ref = 1;
+				goto out;
+		}
+
+		if (prompt(ost, PY, PR_DISCONTIG_BG_LEAF_CLUSTERS,
+			   "Extent record %d of discontiguous group "
+			   "descriptor %"PRIu64" claims %u clusters, "
+			   "but it should only have %u.  Correct it?",
+			   fix_pos, blkno, rec->e_leaf_clusters,
+			   cpg - total_clusters)) {
+			rec->e_leaf_clusters = cpg - total_clusters;
+			*changed = 1;
+		}
+	}
+out:
+	return;
+}
+
 static errcode_t repair_group_desc(o2fsck_state *ost,
 				   struct ocfs2_dinode *di,
 				   struct chain_state *cs,
@@ -250,6 +442,11 @@ static errcode_t repair_group_desc(o2fsck_state *ost,
 		bg->bg_free_bits_count = max_free_bits;
 		changed = 1;
 	}
+
+	if (ocfs2_gd_is_discontig(bg))
+		check_discontig_bg(ost, cs->cs_cpg, bg, &changed, clear_ref);
+	if (*clear_ref)
+		goto out;
 
 	/* XXX check bg_bits vs cpg/bpc. */
 
@@ -380,18 +577,32 @@ out:
 }
 
 static void mark_group_used(o2fsck_state *ost, struct chain_state *cs,
-			    uint64_t blkno, int just_desc)
+			    uint64_t blkno, int just_desc,
+			    struct ocfs2_group_desc *desc)
 {
-	uint16_t clusters;
+	int i;
+	uint16_t clusters = 0;
 
 	if (just_desc)
 		clusters = 1;
-	else
+	else if (!desc || !ocfs2_gd_is_discontig(desc))
 		clusters = cs->cs_cpg;
 
-	o2fsck_mark_clusters_allocated(ost, 
+	if (clusters) {
+		o2fsck_mark_clusters_allocated(ost,
 				ocfs2_blocks_to_clusters(ost->ost_fs, blkno),
 				clusters);
+		return;
+	}
+
+	/* Now check the discontiguous group case. */
+	for (i = 0; i < desc->bg_list.l_next_free_rec; i++) {
+		struct ocfs2_extent_rec *rec = &desc->bg_list.l_recs[i];
+
+		o2fsck_mark_clusters_allocated(ost,
+			ocfs2_blocks_to_clusters(ost->ost_fs, rec->e_blkno),
+			rec->e_leaf_clusters);
+	}
 }
 
 /*
@@ -455,6 +666,46 @@ out:
 	return ret;
 }
 
+static errcode_t break_loop(o2fsck_state *ost, struct ocfs2_chain_rec *chain,
+		unsigned int max_depth)
+{
+	uint64_t *list;
+	int i;
+	unsigned int depth = 0;
+	uint64_t blkno = chain->c_blkno;
+	char *buf;
+	struct ocfs2_group_desc *gd;
+	errcode_t ret = ocfs2_malloc0(sizeof(uint64_t) * max_depth, &list);
+	if (ret)
+		goto out;
+	ret =  ocfs2_malloc_block(ost->ost_fs->fs_io, &buf);
+	if (ret)
+		goto out;
+	gd = (struct ocfs2_group_desc *)buf;
+
+	while (blkno && (depth<=max_depth)) {
+		list[depth++] = blkno;
+		ret = ocfs2_read_group_desc(ost->ost_fs, blkno, buf);
+		if (ret)
+			goto out;
+		blkno = gd->bg_next_group;
+		for (i=0; i<depth; i++)
+			if (list[i]==blkno) {
+				gd->bg_next_group = 0;
+				verbosef("Breaking gd loop %"PRIu64"\n", blkno);
+				ret = ocfs2_write_group_desc(ost->ost_fs,
+						blkno, buf);
+				goto out;
+			}
+	}
+out:
+	if (list)
+		ocfs2_free(&list);
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}
+
 /* this takes a slightly ridiculous number of arguments :/ */
 static errcode_t check_chain(o2fsck_state *ost,
 			     struct ocfs2_dinode *di,
@@ -462,18 +713,16 @@ static errcode_t check_chain(o2fsck_state *ost,
 			     struct ocfs2_chain_rec *chain,
 			     char *buf1,
 			     char *buf2,
-			     char *pre_cache_buf,
 			     int *chain_changed,
 			     ocfs2_bitmap *allowed,
-			     ocfs2_bitmap *forbidden)
+			     ocfs2_bitmap *forbidden,
+			     unsigned int max_depth)
 {
 	struct ocfs2_group_desc *bg1 = (struct ocfs2_group_desc *)buf1;
 	struct ocfs2_group_desc *bg2 = (struct ocfs2_group_desc *)buf2;
 	uint64_t blkno;
 	errcode_t ret = 0;
 	int depth = 0, clear_ref = 0;
-	int blocks_per_group = ocfs2_clusters_to_blocks(ost->ost_fs,
-							cs->cs_cpg);
 
 	verbosef("free %u total %u blkno %"PRIu64"\n", chain->c_free,
 		 chain->c_total, (uint64_t)chain->c_blkno);
@@ -497,13 +746,13 @@ static errcode_t check_chain(o2fsck_state *ost,
 					o2fsck_bitmap_clear(allowed, blkno,
 							    &was_set);
 					mark_group_used(ost, cs, bg1->bg_blkno,
-							allowed != NULL);
+							allowed != NULL, bg1);
 				} else if (forbidden)
 					o2fsck_bitmap_set(forbidden, blkno,
 							  &was_set);
 			} else
 				mark_group_used(ost, cs, bg1->bg_blkno,
-						allowed != NULL);
+						allowed != NULL, bg1);
 			blkno = bg1->bg_next_group;
 		}
 
@@ -527,15 +776,6 @@ static errcode_t check_chain(o2fsck_state *ost,
 			/* this will just result in a bad blkno from
 			 * the read below.. */
 		}
-
-		/*
-		 * Pre-cache the entire group.  Don't care about failure.
-		 * If it works, the following ocfs2_read_group_desc() will
-		 * get the block out of the cache.
-		 */
-		if (pre_cache_buf)
-			ocfs2_read_blocks(ost->ost_fs, blkno,
-					  blocks_per_group, pre_cache_buf);
 
 		ret = ocfs2_read_group_desc(ost->ost_fs, blkno, (char *)bg2);
 		if (ret == OCFS2_ET_BAD_GROUP_DESC_MAGIC) {
@@ -593,6 +833,14 @@ static errcode_t check_chain(o2fsck_state *ost,
 		/* the loop will now start by reading bg1->next_group */
 		memcpy(buf1, buf2, ost->ost_fs->fs_blocksize);
 		depth++;
+		if (depth > max_depth) {
+			 if (prompt(ost, PY, PR_GROUP_CHAIN_LOOP,
+			    "Loop detected in chain %d at block %"PRIu64
+			    ". Break the loop?",cs->cs_chain_no,
+			    (uint64_t) chain->c_blkno))
+				ret = break_loop(ost, chain, max_depth);
+			break;
+		}
 	}
 
 	/* we hit the premature end of a chain.. clear the last
@@ -644,18 +892,18 @@ out:
 static errcode_t verify_chain_alloc(o2fsck_state *ost,
 				    struct ocfs2_dinode *di,
 				    char *buf1, char *buf2,
-				    char *pre_cache_buf,
 				    ocfs2_bitmap *allowed,
 				    ocfs2_bitmap *forbidden)
 {
 	struct chain_state cs = {0, };
 	struct ocfs2_chain_list *cl;
-	int i, max_count;
+	uint16_t i, max_count;
 	struct ocfs2_chain_rec *cr;
 	uint32_t free = 0, total = 0;
 	int changed = 0, trust_next_free = 1;
 	errcode_t ret = 0;
 	uint64_t chain_bytes;
+	unsigned int num_gds, max_chain_len;
 
 	if (memcmp(di->i_signature, OCFS2_INODE_SIGNATURE,
 		   strlen(OCFS2_INODE_SIGNATURE))) {
@@ -685,9 +933,12 @@ static errcode_t verify_chain_alloc(o2fsck_state *ost,
 	/* XXX should we check suballoc_node? */
 
 	cl = &di->id2.i_chain;
+	num_gds = (di->i_clusters + cl->cl_cpg)/cl->cl_cpg;
+	max_chain_len = (num_gds + cl->cl_count)/cl->cl_count;
 
-	verbosef("cl cpg %u bpc %u count %u next %u\n", 
-		 cl->cl_cpg, cl->cl_bpc, cl->cl_count, cl->cl_next_free_rec);
+	verbosef("cl cpg %u bpc %u count %u next %u gds %u max_ch_len %u\n",
+		 cl->cl_cpg, cl->cl_bpc, cl->cl_count, cl->cl_next_free_rec,
+		 num_gds, max_chain_len);
 
 	max_count = ocfs2_chain_recs_per_inode(ost->ost_fs->fs_blocksize);
 
@@ -741,13 +992,7 @@ static errcode_t verify_chain_alloc(o2fsck_state *ost,
 	if (trust_next_free)
 		max_count = cl->cl_next_free_rec;
 
-	/*
-	 * We walk the chains backwards for caching reasons.  Basically,
-	 * at the end the last blocks we read will be the most recently
-	 * used in the cache.  We want that to be the first chains,
-	 * especially for the inode scan, which will read forwards.
-	 */
-	for (i = max_count - 1; i >= 0; i--) {
+	for (i = 0; i < max_count; i++) {
 		cr = &cl->cl_recs[i];
 
 		/* reset for each run */
@@ -755,8 +1000,8 @@ static errcode_t verify_chain_alloc(o2fsck_state *ost,
 			.cs_chain_no = i,
 			.cs_cpg = cl->cl_cpg,
 		};
-		ret = check_chain(ost, di, &cs, cr, buf1, buf2, pre_cache_buf,
-				  &changed, allowed, forbidden);
+		ret = check_chain(ost, di, &cs, cr, buf1, buf2, &changed,
+				  allowed, forbidden, max_chain_len);
 		/* XXX what?  not checking ret? */
 
 		if (cr->c_blkno != 0) {
@@ -783,13 +1028,12 @@ static errcode_t verify_chain_alloc(o2fsck_state *ost,
 			 * we copy the last chain into the missing spot
 			 * instead of shifting everyone over a spot 
 			 * to minimize the number of chains we have to
-			 * update.  we then reset i so that we can go
-			 * over that chain and fix bg_chain */
+			 * update */
 			if (i < (cl->cl_next_free_rec - 1)) {
 				*cr = cl->cl_recs[cl->cl_next_free_rec - 1];
 				memset(&cl->cl_recs[cl->cl_next_free_rec - 1],
 					0, sizeof(struct ocfs2_chain_rec));
-				i++;
+				i--;
 			}
 
 			cl->cl_next_free_rec--;
@@ -869,7 +1113,7 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 				     char *buf1, char *buf2)
 {
 	struct ocfs2_cluster_group_sizes cgs;
-	uint16_t i, max_recs;
+	uint16_t max_recs;
 	uint16_t bits, chain;
 	uint64_t blkno;
 	struct ocfs2_group_desc *bg = (struct ocfs2_group_desc *)buf1;
@@ -877,7 +1121,7 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 	struct chain_state cs;
 	struct ocfs2_chain_rec *rec;
 	ocfs2_bitmap *allowed = NULL, *forbidden = NULL;
-	int was_set;
+	int was_set, i;
 
 	/* XXX ugh, only used by mark_ */
 	cs.cs_cpg = di->id2.i_chain.cl_cpg;
@@ -909,7 +1153,7 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 		o2fsck_bitmap_set(allowed, blkno, NULL);
 	}
 
-	ret = verify_chain_alloc(ost, di, buf1, buf2, NULL, allowed, forbidden);
+	ret = verify_chain_alloc(ost, di, buf1, buf2, allowed, forbidden);
 	if (ret) {
 		com_err(whoami, ret, "while looking up chain allocator inode "
 			"%"PRIu64, (uint64_t)di->i_blkno);
@@ -927,7 +1171,7 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 			    "so shouldn't be in the allocator.  Remove it "
 			    "from the chain?", blkno)) {
 
-			mark_group_used(ost, &cs, blkno, 1);
+			mark_group_used(ost, &cs, blkno, 1, NULL);
 			continue;
 		}
 
@@ -980,7 +1224,7 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 			ocfs2_init_group_desc(ost->ost_fs, bg, blkno,
 					      ost->ost_fs_generation,
 					      di->i_blkno,
-					      bits, chain);
+					      bits, chain, 0);
 			ret = 0;
 		}
 		if (ret) {
@@ -991,7 +1235,9 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 		}
 
 		/* first some easy fields */
-		bg->bg_size = ocfs2_group_bitmap_size(ost->ost_fs->fs_blocksize);
+		bg->bg_size = ocfs2_group_bitmap_size(
+			ost->ost_fs->fs_blocksize, 0,
+			OCFS2_RAW_SB(ost->ost_fs->fs_super)->s_feature_incompat);
 		bg->bg_bits = bits;
 		bg->bg_parent_dinode = di->i_blkno;
 		bg->bg_blkno = blkno;
@@ -1042,7 +1288,7 @@ static errcode_t verify_bitmap_descs(o2fsck_state *ost,
 			goto out;
 		}
 
-		mark_group_used(ost, &cs, bg->bg_blkno, 1);
+		mark_group_used(ost, &cs, bg->bg_blkno, 1, bg);
 	}
 
 out:
@@ -1062,14 +1308,16 @@ errcode_t o2fsck_pass0(o2fsck_state *ost)
 	uint64_t blkno;
 	uint32_t pre_repair_clusters;
 	char *blocks = NULL;
-	char *pre_cache_buf = NULL;
 	struct ocfs2_dinode *di = NULL;
 	ocfs2_filesys *fs = ost->ost_fs;
 	ocfs2_cached_inode **ci;
 	int max_slots = OCFS2_RAW_SB(fs->fs_super)->s_max_slots;
 	int i, type, bitmap_retried = 0;
+	struct o2fsck_resource_track rt;
 
 	printf("Pass 0a: Checking cluster allocation chains\n");
+
+	o2fsck_init_resource_track(&rt, fs->fs_io);
 
 	/*
 	 * The I/O buffer is 3 blocks. We apportion our I/O buffer
@@ -1085,27 +1333,6 @@ errcode_t o2fsck_pass0(o2fsck_state *ost)
 		goto out;
 	}
 	di = (struct ocfs2_dinode *)blocks;
-
-	/*
-	 * We also allocate a pre-cache buffer of 4MB for reading entire
-	 * suballocator groups.  Some blocksizes have smaller groups, but
-	 * none have larger (see
-	 * libocfs2/alloc.c:ocfs2_clusters_per_group()).  This allows
-	 * us to pre-fill the I/O cache; we're already reading the group
-	 * descriptor, so slurping the whole thing shouldn't hurt.
-	 *
-	 * If this allocation fails, we just ignore it.  It's a cache.
-	 */
-	o2fsck_reset_blocks_cached();
-	if (o2fsck_worth_caching(1)) {
-		ret = ocfs2_malloc_blocks(fs->fs_io,
-					  ocfs2_blocks_in_bytes(fs, 4 * 1024 * 1024),
-					  &pre_cache_buf);
-		if (ret)
-			verbosef("Unable to allocate group pre-cache "
-				 "buffer, %s\n",
-				 "ignoring");
-	}
 
 	ret = ocfs2_malloc0(max_slots * sizeof(ocfs2_cached_inode *), 
 			    &ost->ost_inode_allocs);
@@ -1160,6 +1387,11 @@ errcode_t o2fsck_pass0(o2fsck_state *ost)
 		}
 	}
 
+	/* Warm up the cache with the groups */
+	ret = ocfs2_cache_chain_allocator_blocks(fs, di);
+	if (ret)
+		verbosef("Caching global bitmap failed, err %d\n", (int)ret);
+
 retry_bitmap:
 	pre_repair_clusters = di->i_clusters;
 	ret = verify_bitmap_descs(ost, di, blocks + ost->ost_fs->fs_blocksize,
@@ -1205,7 +1437,13 @@ retry_bitmap:
 		}
 	}
 
+	o2fsck_compute_resource_track(&rt, fs->fs_io);
+	o2fsck_print_resource_track("Pass 0a", ost, &rt, fs->fs_io);
+	o2fsck_add_resource_track(&ost->ost_rt, &rt);
+
 	printf("Pass 0b: Checking inode allocation chains\n");
+
+	o2fsck_init_resource_track(&rt, fs->fs_io);
 
 	/* first the global inode alloc and then each of the node's
 	 * inode allocators */
@@ -1230,11 +1468,17 @@ retry_bitmap:
 		verbosef("found inode alloc %"PRIu64" at block %"PRIu64"\n",
 			 (uint64_t)di->i_blkno, blkno);
 
+		/* Warm up the cache with the groups */
+		ret = ocfs2_cache_chain_allocator_blocks(fs, di);
+		if (ret)
+			verbosef("Caching inode alloc failed, err %d\n",
+				 (int)ret);
+
 		ret = verify_chain_alloc(ost, di,
 					 blocks + ost->ost_fs->fs_blocksize,
 					 blocks + 
 					 (ost->ost_fs->fs_blocksize * 2), 
-					 pre_cache_buf, NULL, NULL);
+					 NULL, NULL);
 
 		/* XXX maybe helped by the alternate super block */
 		if (ret)
@@ -1262,7 +1506,13 @@ retry_bitmap:
 		}
 	}
 
+	o2fsck_compute_resource_track(&rt, fs->fs_io);
+	o2fsck_print_resource_track("Pass 0b", ost, &rt, fs->fs_io);
+	o2fsck_add_resource_track(&ost->ost_rt, &rt);
+
 	printf("Pass 0c: Checking extent block allocation chains\n");
+
+	o2fsck_init_resource_track(&rt, fs->fs_io);
 
 	for (i = 0; i < max_slots; i++) {
 		ret = ocfs2_lookup_system_inode(fs, EXTENT_ALLOC_SYSTEM_INODE,
@@ -1283,20 +1533,28 @@ retry_bitmap:
 		verbosef("found extent alloc %"PRIu64" at block %"PRIu64"\n",
 			 (uint64_t)di->i_blkno, blkno);
 
+		/* Warm up the cache with the groups */
+		ret = ocfs2_cache_chain_allocator_blocks(fs, di);
+		if (ret)
+			verbosef("Caching extent alloc failed, err %d\n",
+				 (int)ret);
+
 		ret = verify_chain_alloc(ost, di,
 					 blocks + ost->ost_fs->fs_blocksize,
 					 blocks + 
 					 (ost->ost_fs->fs_blocksize * 2), 
-					 pre_cache_buf, NULL, NULL);
+					 NULL, NULL);
 
 		/* XXX maybe helped by the alternate super block */
 		if (ret)
 			goto out;
 	}
 
+	o2fsck_compute_resource_track(&rt, fs->fs_io);
+	o2fsck_print_resource_track("Pass 0c", ost, &rt, fs->fs_io);
+	o2fsck_add_resource_track(&ost->ost_rt, &rt);
+
 out:
-	if (pre_cache_buf)
-		ocfs2_free(&pre_cache_buf);
 	if (blocks)
 		ocfs2_free(&blocks);
 	if (ret)

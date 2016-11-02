@@ -1,0 +1,7 @@
+*.sw?
+*.d
+*.cmd
+stamp-md5
+cscope*
+o2info
+o2info.1

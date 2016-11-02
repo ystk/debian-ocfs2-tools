@@ -12,6 +12,12 @@ LIBO2DLM_LIBS = -L$(TOPDIR)/libo2dlm -lo2dlm $(DL_LIBS)
 LIBO2DLM_DEPS = $(TOPDIR)/libo2dlm/libo2dlm.a
 LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb
 LIBO2CB_DEPS = $(TOPDIR)/libo2cb/libo2cb.a
+ifneq ($(BUILD_FSDLM_SUPPORT),)
+LIBO2CB_LIBS += -ldlm_lt
+endif
+ifneq ($(BUILD_CMAP_SUPPORT),)
+LIBO2CB_LIBS += -lcmap
+endif
 
 DEFINES = -DVERSION=\"$(VERSION)\"
 
@@ -28,6 +34,6 @@ DIST_FILES = $(CORE_CFILES) $(MOUNT_CFILES)	\
 	     $(HFILES) $(addsuffix .in,$(MANS))
 
 mount.ocfs2: $(MOUNT_OBJS) $(LIBOCFS2_DEPS) $(LIBO2DLM_DEPS) $(LIBO2CB_DEPS)
-	$(LINK) $(LIBOCFS2_LIBS) $(LIBO2DLM_LIBS) $(LIBO2CB_LIBS) $(COM_ERR_LIBS)
+	$(LINK) $(LIBOCFS2_LIBS) $(LIBO2DLM_LIBS) $(LIBO2CB_LIBS) $(COM_ERR_LIBS) $(AIO_LIBS)
 
 include $(TOPDIR)/Postamble.make

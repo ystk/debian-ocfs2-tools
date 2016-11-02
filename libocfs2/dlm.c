@@ -107,9 +107,10 @@ errcode_t ocfs2_fill_cluster_desc(ocfs2_filesys *fs,
 	errcode_t ret = 0;
 	struct ocfs2_super_block *sb = OCFS2_RAW_SB(fs->fs_super);
 
-	if (!ocfs2_userspace_stack(sb)) {
+	if (!ocfs2_clusterinfo_valid(sb)) {
 		desc->c_stack = NULL;
 		desc->c_cluster = NULL;
+		desc->c_flags = 0;
 		return 0;
 	}
 
@@ -127,40 +128,112 @@ errcode_t ocfs2_fill_cluster_desc(ocfs2_filesys *fs,
 	       OCFS2_STACK_LABEL_LEN);
 	memcpy(desc->c_cluster, sb->s_cluster_info.ci_cluster,
 	       OCFS2_CLUSTER_NAME_LEN);
+	desc->c_flags = sb->s_cluster_info.ci_stackflags;
 
 	return 0;
+}
+
+static errcode_t ocfs2_set_cluster_flags(ocfs2_filesys *fs,
+					 struct o2cb_cluster_desc *desc)
+{
+	struct ocfs2_super_block *sb = OCFS2_RAW_SB(fs->fs_super);
+
+	sb->s_cluster_info.ci_stackflags = 0;
+
+	/* exit if classic o2cb (default cluster stack) */
+	if (!desc->c_stack)
+		goto out;
+
+	if (strcmp(desc->c_stack, OCFS2_CLASSIC_CLUSTER_STACK))
+		goto out;
+
+	if ((desc->c_flags & OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT))
+		sb->s_cluster_info.ci_stackflags |=
+			OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT;
+out:
+	return 0;
+}
+
+static errcode_t ocfs2_set_cluster_incompats(ocfs2_filesys *fs,
+					     struct o2cb_cluster_desc *desc)
+{
+	errcode_t ret = 0;
+	struct ocfs2_super_block *sb = OCFS2_RAW_SB(fs->fs_super);
+
+	/* if default stack, then disable both clusterinfo and userspace */
+	if (!desc->c_stack) {
+		sb->s_feature_incompat &=
+			~OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
+		sb->s_feature_incompat &=
+			~OCFS2_FEATURE_INCOMPAT_CLUSTERINFO;
+		goto out;
+	}
+
+	/* extended slot map has to be enabled for non default stack */
+	if (!ocfs2_uses_extended_slot_map(sb)) {
+		sb->s_feature_incompat |=
+			OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP;
+		ret = ocfs2_format_slot_map(fs);
+		if (ret)
+			goto out;
+	}
+
+	/* if o2cb, then enable clusterinfo and disable userspace */
+	if (!strcmp(desc->c_stack, OCFS2_CLASSIC_CLUSTER_STACK)) {
+		sb->s_feature_incompat |=
+			OCFS2_FEATURE_INCOMPAT_CLUSTERINFO;
+		sb->s_feature_incompat &=
+			~OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
+		goto out;
+	}
+
+	/* if not o2cb, then enable userspace only if clusterinfo disabled */
+	if (!(sb->s_feature_incompat & OCFS2_FEATURE_INCOMPAT_CLUSTERINFO))
+		sb->s_feature_incompat |=
+			OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
+	else
+		sb->s_feature_incompat &=
+			~OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
+
+out:
+	return ret;
 }
 
 errcode_t ocfs2_set_cluster_desc(ocfs2_filesys *fs,
 				 struct o2cb_cluster_desc *desc)
 {
-	errcode_t ret;
+	errcode_t ret = OCFS2_ET_INVALID_ARGUMENT;
 	struct ocfs2_super_block *sb = OCFS2_RAW_SB(fs->fs_super);
 
-	if (desc->c_stack) {
-		if (!desc->c_stack[0] || !desc->c_cluster ||
-		    !desc->c_cluster[0]) {
-			ret = OCFS2_ET_INVALID_ARGUMENT;
+	if (!desc->c_stack) {
+		memset(sb->s_cluster_info.ci_stack, 0, OCFS2_STACK_LABEL_LEN);
+		memset(sb->s_cluster_info.ci_cluster, 0,
+		       OCFS2_CLUSTER_NAME_LEN);
+	} else {
+		if (!o2cb_valid_stack_name(desc->c_stack))
 			goto out;
-		}
 
-		if (!ocfs2_uses_extended_slot_map(sb)) {
-			sb->s_feature_incompat |=
-				OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP;
-			ret = ocfs2_format_slot_map(fs);
-			if (ret)
+		if (!strcmp(desc->c_stack, OCFS2_CLASSIC_CLUSTER_STACK)) {
+			if (!o2cb_valid_o2cb_cluster_name(desc->c_cluster))
+				goto out;
+		} else {
+			if (!o2cb_valid_cluster_name(desc->c_cluster))
 				goto out;
 		}
-		sb->s_feature_incompat |=
-			OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
+
 		memcpy(sb->s_cluster_info.ci_stack, desc->c_stack,
 		       OCFS2_STACK_LABEL_LEN);
 		memcpy(sb->s_cluster_info.ci_cluster, desc->c_cluster,
 		       OCFS2_CLUSTER_NAME_LEN);
-	} else {
-		sb->s_feature_incompat &=
-			~OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK;
 	}
+
+	ret = ocfs2_set_cluster_flags(fs, desc);
+	if (ret)
+		goto out;
+
+	ret = ocfs2_set_cluster_incompats(fs, desc);
+	if (ret)
+		goto out;
 
 	ret = ocfs2_write_super(fs);
 
@@ -172,6 +245,7 @@ errcode_t ocfs2_initialize_dlm(ocfs2_filesys *fs, const char *service)
 {
 	struct o2dlm_ctxt *dlm_ctxt = NULL;
 	errcode_t ret = 0;
+	int stackglue_support;
 	struct o2cb_cluster_desc cluster;
 	struct o2cb_region_desc desc;
 	char *stack_path;
@@ -184,6 +258,10 @@ errcode_t ocfs2_initialize_dlm(ocfs2_filesys *fs, const char *service)
 	if (ret)
 		goto bail;
 
+	ret = o2dlm_supports_stackglue(&stackglue_support);
+	if (ret)
+		goto bail;
+
 	desc.r_service = (char *)service;
 	desc.r_persist = 0;
 	ret = o2cb_begin_group_join(&cluster, &desc);
@@ -191,13 +269,18 @@ errcode_t ocfs2_initialize_dlm(ocfs2_filesys *fs, const char *service)
 		goto bail;
 
 	/*
-	 * NULL c_stack means o2cb, means use DLMFS, means
-	 * pass DLMFS_PATH.  If we're using a userspace stack, pass NULL.
+	 * We want to use dlmfs if we can, as it provides the full feature
+	 * set of libo2dlm.  Any dlmfs with the 'stackglue' capability will
+	 * support all cluster stacks.  An empty cluster.c_stack means
+	 * o2cb, which always supports dlmfs.
+	 *
+	 * If we're unlucky enough to have older userspace stack code,
+	 * we pass NULL to avoid dlmfs.
 	 */
-	if (cluster.c_stack)
-		stack_path = NULL;
-	else
+	if (stackglue_support || !cluster.c_stack)
 		stack_path = DEFAULT_DLMFS_PATH;
+	else
+		stack_path = NULL;
 	ret = o2dlm_initialize(stack_path, fs->uuid_str, &dlm_ctxt);
 	if (ret) {
 		/* What to do with an error code? */

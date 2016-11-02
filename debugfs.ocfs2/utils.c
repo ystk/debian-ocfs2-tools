@@ -5,7 +5,7 @@
  *
  * utility functions
  *
- * Copyright (C) 2004, 2008 Oracle.  All rights reserved.
+ * Copyright (C) 2004, 2011 Oracle.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -27,213 +27,97 @@
 #include "main.h"
 #include "ocfs2/bitops.h"
 
-extern dbgfs_gbls gbls;
+extern struct dbgfs_gbls gbls;
 
-void get_incompat_flag(uint32_t flag, GString *str)
+void get_incompat_flag(struct ocfs2_super_block *sb, char *buf, size_t count)
 {
 	errcode_t err;
-	char buf[PATH_MAX];
 	ocfs2_fs_options flags = {
-		.opt_incompat = flag,
+		.opt_incompat = sb->s_feature_incompat,
 	};
 
 	*buf = '\0';
-	err = ocfs2_snprint_feature_flags(buf, PATH_MAX, &flags);
-	if (!err)
-		g_string_append(str, buf);
-	else
-		com_err(gbls.cmd, err, "while processing feature flags");
+	err = ocfs2_snprint_feature_flags(buf, count, &flags);
+	if (err)
+		com_err(gbls.cmd, err, "while processing incompat flags");
 }
 
-void get_tunefs_flag(uint32_t incompat_flag, uint16_t flag, GString *str)
+void get_tunefs_flag(struct ocfs2_super_block *sb, char *buf, size_t count)
 {
 	errcode_t err;
-	char buf[PATH_MAX];
 
 	*buf = '\0';
-	err = ocfs2_snprint_tunefs_flags(buf, PATH_MAX, flag);
-	if (!err)
-		g_string_append(str, buf);
-	else
-		com_err(gbls.cmd, err, "while processing inprog flags");
+	err = ocfs2_snprint_tunefs_flags(buf, count, sb->s_tunefs_flag);
+	if (err)
+		com_err(gbls.cmd, err, "while processing tunefs flags");
 }
 
-void get_compat_flag(uint32_t flag, GString *str)
+void get_compat_flag(struct ocfs2_super_block *sb, char *buf, size_t count)
 {
 	errcode_t err;
-	char buf[PATH_MAX];
 	ocfs2_fs_options flags = {
-		.opt_compat = flag,
+		.opt_compat = sb->s_feature_compat,
 	};
 
 	*buf = '\0';
-	err = ocfs2_snprint_feature_flags(buf, PATH_MAX, &flags);
-	if (!err)
-		g_string_append(str, buf);
-	else
-		com_err(gbls.cmd, err, "while processing feature flags");
+	err = ocfs2_snprint_feature_flags(buf, count, &flags);
+	if (err)
+		com_err(gbls.cmd, err, "while processing compat flags");
 }
 
-void get_rocompat_flag(uint32_t flag, GString *str)
+void get_rocompat_flag(struct ocfs2_super_block *sb, char *buf, size_t count)
 {
 	errcode_t err;
-	char buf[PATH_MAX];
 	ocfs2_fs_options flags = {
-		.opt_ro_compat = flag,
+		.opt_ro_compat = sb->s_feature_ro_compat,
 	};
 
 	*buf = '\0';
-	err = ocfs2_snprint_feature_flags(buf, PATH_MAX, &flags);
-	if (!err)
-		g_string_append(str, buf);
-	else
-		com_err(gbls.cmd, err, "while processing feature flags");
+	err = ocfs2_snprint_feature_flags(buf, count, &flags);
+	if (err)
+		com_err(gbls.cmd, err, "while processing ro compat flags");
 }
 
-/*
- * get_vote_flag()
- *
- */
-void get_vote_flag (uint32_t flag, GString *str)
+void get_cluster_info_flag(struct ocfs2_super_block *sb, char *buf,
+			   size_t count)
 {
-	if (flag & FLAG_VOTE_NODE)
-		g_string_append (str, "ok ");
+	errcode_t err = 0;
 
-	if (flag & FLAG_VOTE_OIN_UPDATED)
-		g_string_append (str, "oin_upd ");
+	*buf = '\0';
+	if (ocfs2_o2cb_stack(sb))
+		err = ocfs2_snprint_cluster_o2cb_flags(buf, count,
+					sb->s_cluster_info.ci_stackflags);
 
-	if (flag & FLAG_VOTE_OIN_ALREADY_INUSE)
-		 g_string_append (str, "inuse ");
-
-	if (flag & FLAG_VOTE_UPDATE_RETRY)
-		 g_string_append (str, "retry ");
-
-	if (flag & FLAG_VOTE_FILE_DEL)
-		g_string_append (str, "del ");
-
-	if (flag & ~(FLAG_VOTE_NODE | FLAG_VOTE_OIN_UPDATED |
-		     FLAG_VOTE_OIN_ALREADY_INUSE |
-		     FLAG_VOTE_UPDATE_RETRY | FLAG_VOTE_FILE_DEL))
-		g_string_append (str, "unknown");
-
-	if (!str->len)
-		g_string_append (str, "none");
-
-	return ;
-}
-
-/*
- * get_publish_flag()
- *
- */
-void get_publish_flag (uint32_t flag, GString *str)
-{
-	if (flag & FLAG_FILE_CREATE)
-		g_string_append (str, "create ");
-
-	if (flag & FLAG_FILE_EXTEND)
-		g_string_append (str, "extend ");
-
-	if (flag & FLAG_FILE_DELETE)
-		g_string_append (str, "delete ");
-
-	if (flag & FLAG_FILE_RENAME)
-		g_string_append (str, "rename ");
-
-	if (flag & FLAG_FILE_UPDATE)
-		g_string_append (str, "update ");
-
-	if (flag & FLAG_FILE_RECOVERY)
-		g_string_append (str, "recovery ");
-
-	if (flag & FLAG_FILE_CREATE_DIR)
-		g_string_append (str, "createdir ");
-
-	if (flag & FLAG_FILE_UPDATE_OIN)
-		g_string_append (str, "upd_oin ");
-
-	if (flag & FLAG_FILE_RELEASE_MASTER)
-		g_string_append (str, "rls_mstr ");
-
-	if (flag & FLAG_RELEASE_DENTRY)
-		g_string_append (str, "rls_dntry ");
-
-	if (flag & FLAG_CHANGE_MASTER)
-		g_string_append (str, "chng_mstr ");
-
-	if (flag & FLAG_ADD_OIN_MAP)
-		g_string_append (str, "add_oin ");
-
-	if (flag & FLAG_DIR)
-		g_string_append (str, "dir ");
-
-	if (flag & FLAG_REMASTER)
-		g_string_append (str, "re_mstr ");
-
-	if (flag & FLAG_FAST_PATH_LOCK)
-		g_string_append (str, "fast_path");
-
-	if (flag & FLAG_FILE_RELEASE_CACHE)
-		g_string_append (str, "rls_cache ");
-
-	if (flag & FLAG_FILE_TRUNCATE)
-		g_string_append (str, "trunc ");
-
-	if (flag & FLAG_DROP_READONLY)
-		g_string_append (str, "drop_ro ");
-
-	if (flag & FLAG_READDIR)
-		g_string_append (str, "rddir ");
-
-	if (flag & FLAG_ACQUIRE_LOCK)
-		g_string_append (str, "acq ");
-
-	if (flag & FLAG_RELEASE_LOCK)
-		g_string_append (str, "rls ");
-
-	if (flag & ~(FLAG_FILE_CREATE | FLAG_FILE_EXTEND | FLAG_FILE_DELETE |
-		     FLAG_FILE_RENAME | FLAG_FILE_UPDATE | FLAG_FILE_RECOVERY |
-		     FLAG_FILE_CREATE_DIR | FLAG_FILE_UPDATE_OIN |
-		     FLAG_FILE_RELEASE_MASTER | FLAG_RELEASE_DENTRY |
-		     FLAG_CHANGE_MASTER | FLAG_ADD_OIN_MAP | FLAG_DIR |
-		     FLAG_REMASTER | FLAG_FAST_PATH_LOCK |
-		     FLAG_FILE_RELEASE_CACHE | FLAG_FILE_TRUNCATE |
-		     FLAG_DROP_READONLY | FLAG_READDIR | FLAG_ACQUIRE_LOCK |
-		     FLAG_RELEASE_LOCK))
-		g_string_append (str, "unknown");
-
-	if (!str->len)
-		g_string_append (str, "none");
-
-	return ;
+	if (err)
+		com_err(gbls.cmd, err, "while processing clusterinfo flags");
 }
 
 /*
  * get_journal_block_type()
  *
  */
-void get_journal_block_type (uint32_t jtype, GString *str)
+void get_journal_block_type(uint32_t jtype, GString *str)
 {
 	switch (jtype) {
 	case JBD2_DESCRIPTOR_BLOCK:
-		g_string_append (str, "JBD2_DESCRIPTOR_BLOCK");
+		g_string_append(str, "JBD2_DESCRIPTOR_BLOCK");
 		break;
 	case JBD2_COMMIT_BLOCK:
-		g_string_append (str, "JBD2_COMMIT_BLOCK");
+		g_string_append(str, "JBD2_COMMIT_BLOCK");
 		break;
 	case JBD2_SUPERBLOCK_V1:
-		g_string_append (str, "JBD2_SUPERBLOCK_V1");
+		g_string_append(str, "JBD2_SUPERBLOCK_V1");
 		break;
 	case JBD2_SUPERBLOCK_V2:
-		g_string_append (str, "JBD2_SUPERBLOCK_V2");
+		g_string_append(str, "JBD2_SUPERBLOCK_V2");
 		break;
 	case JBD2_REVOKE_BLOCK:
-		g_string_append (str, "JBD2_REVOKE_BLOCK");
+		g_string_append(str, "JBD2_REVOKE_BLOCK");
 		break;
 	}
 
 	if (!str->len)
-		g_string_append (str, "none");
+		g_string_append(str, "none");
 
 	return ;
 }
@@ -242,27 +126,93 @@ void get_journal_block_type (uint32_t jtype, GString *str)
  * get_tag_flag()
  *
  */
-void get_tag_flag (uint32_t flags, GString *str)
+void get_tag_flag(uint32_t flags, GString *str)
 {
 	if (flags == 0) {
-		g_string_append (str, "none");
+		g_string_append(str, "none");
 		goto done;
 	}
 
 	if (flags & JBD2_FLAG_ESCAPE)
-		g_string_append (str, "JBD2_FLAG_ESCAPE ");
+		g_string_append(str, "JBD2_FLAG_ESCAPE ");
 
 	if (flags & JBD2_FLAG_SAME_UUID)
-		g_string_append (str, "JBD2_FLAG_SAME_UUID ");
+		g_string_append(str, "JBD2_FLAG_SAME_UUID ");
 
 	if (flags & JBD2_FLAG_DELETED)
-		g_string_append (str, "JBD2_FLAG_DELETED ");
+		g_string_append(str, "JBD2_FLAG_DELETED ");
 
 	if (flags & JBD2_FLAG_LAST_TAG)
-		g_string_append (str, "JBD2_FLAG_LAST_TAG");
+		g_string_append(str, "JBD2_FLAG_LAST_TAG");
 
 done:
 	return ;
+}
+
+void get_journal_compat_flag(uint32_t flags, char *buf, size_t count)
+{
+	size_t out = 0;
+
+	*buf = '\0';
+
+	if (flags & JBD2_FEATURE_COMPAT_CHECKSUM)
+		out += snprintf(buf + out, count - out, "checksum ");
+
+	if (flags & ~JBD2_FEATURE_COMPAT_CHECKSUM)
+		out += snprintf(buf + out, count - out, "unknown");
+}
+
+void get_journal_incompat_flag(uint32_t flags, char *buf, size_t count)
+{
+	size_t out = 0;
+
+	*buf = '\0';
+
+	if (flags & JBD2_FEATURE_INCOMPAT_REVOKE)
+		out += snprintf(buf + out, count - out, "revoke ");
+
+	if (flags & JBD2_FEATURE_INCOMPAT_64BIT)
+		out += snprintf(buf + out, count - out, "block64 ");
+	else
+		out += snprintf(buf + out, count - out, "block32 ");
+
+	if (flags & JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT)
+		out += snprintf(buf + out, count - out, "async-commit ");
+
+	if (flags & ~(JBD2_FEATURE_INCOMPAT_REVOKE |
+		      JBD2_FEATURE_INCOMPAT_64BIT |
+		      JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT))
+		out += snprintf(buf + out, count - out, "unknown");
+}
+
+void get_journal_rocompat_flag(uint32_t flags, char *buf, size_t count)
+{
+	size_t out = 0;
+
+	*buf = '\0';
+
+	if (flags)
+		out += snprintf(buf + out, count - out, "unknown");
+}
+
+/*
+ * Adds nanosec to the ctime output. eg. Tue Jul 19 13:36:52.123456 2011
+ * On error, returns an empty string.
+ */
+void ctime_nano(struct timespec *t, char *buf, int buflen)
+{
+	time_t sec;
+	char tmp[26], *p;
+
+	sec = (time_t)t->tv_sec;
+	if (!ctime_r(&sec, tmp))
+		return;
+
+	/* Find the last space where we will append the nanosec */
+	if ((p = strrchr(tmp, ' '))) {
+		*p = '\0';
+		snprintf(buf, buflen, "%s.%ld %s", tmp, t->tv_nsec, ++p);
+	}
 }
 
 /*
@@ -674,10 +624,10 @@ bail:
  * Copyright (C) 1994 Theodore Ts'o.  This file may be redistributed
  * under the terms of the GNU Public License.
  */
-static int rdump_dirent(struct ocfs2_dir_entry *rec, int offset, int blocksize,
-			char *buf, void *priv_data)
+static int rdump_dirent(struct ocfs2_dir_entry *rec, uint64_t blocknr,
+			int offset, int blocksize, char *buf, void *priv_data)
 {
-	rdump_opts *rd = (rdump_opts *)priv_data;
+	struct rdump_opts *rd = (struct rdump_opts *)priv_data;
 	char tmp = rec->name[rec->name_len];
 	errcode_t ret = 0;
 
@@ -713,7 +663,7 @@ errcode_t rdump_inode(ocfs2_filesys *fs, uint64_t blkno, const char *name,
 	char *dirbuf = NULL;
 	struct ocfs2_dinode *di;
 	int fd;
-	rdump_opts rd_opts = { NULL, NULL, NULL, 0 };
+	struct rdump_opts rd_opts = { NULL, NULL, NULL, 0 };
 
 	len = strlen(dumproot) + strlen(name) + 2;
 	ret = ocfs2_malloc(len, &fullname);
@@ -866,6 +816,65 @@ void find_max_contig_free_bits(struct ocfs2_group_desc *gd, int *max_contig_free
 	}
 }
 
+void print_contig_bits(FILE *out, struct ocfs2_group_desc *gd)
+{
+	int x, free_bits, start, end = 0, avg = 0, found = 0, total = 0;
+	int max_contig_free_bits = 0;
+
+#define HEADER_FORMAT		"%-3s   %-6s   %-6s"
+#define DATA_FORMAT		"%-3d   %-6d   %-6d"
+
+#define LEFT_HEADER		"\t"HEADER_FORMAT"    "
+#define MIDDLE_HEADER		HEADER_FORMAT"    "
+#define RIGHT_HEADER		HEADER_FORMAT"\n"
+
+#define LEFT_DATA		"\t"DATA_FORMAT"    "
+#define MIDDLE_DATA		DATA_FORMAT"    "
+#define RIGHT_DATA		DATA_FORMAT"\n"
+
+	while (end < gd->bg_bits) {
+		start = ocfs2_find_next_bit_clear(gd->bg_bitmap, gd->bg_bits,
+						  end);
+		if (start >= gd->bg_bits)
+			break;
+
+		end = ocfs2_find_next_bit_set(gd->bg_bitmap, gd->bg_bits, start);
+		free_bits = end - start;
+
+		if (!free_bits)
+			continue;
+
+		if (!found) {
+			fprintf(out, LEFT_HEADER, "###", "Start", "Length");
+			fprintf(out, MIDDLE_HEADER, "###", "Start", "Length");
+			fprintf(out, RIGHT_HEADER, "###", "Start", "Length");
+		}
+
+		found++;
+		x = found % 3;
+		if (x == 1)
+		        fprintf(out, LEFT_DATA, found, start, free_bits);
+		else if (x == 2)
+		        fprintf(out, MIDDLE_DATA, found, start, free_bits);
+		else
+		        fprintf(out, RIGHT_DATA, found, start, free_bits);
+
+		total += free_bits;
+
+		if (max_contig_free_bits < free_bits)
+			max_contig_free_bits = free_bits;
+	}
+
+	if (found) {
+		avg = total / found;
+		if (found % 3)
+			fprintf(out, "\n");
+	}
+
+	fprintf(out, "\tFree Extent Count: %d   Longest: %d   Average: %d\n\n",
+		found, max_contig_free_bits, avg);
+}
+
 #define SYSFS_BASE		"/sys/kernel/"
 #define DEBUGFS_PATH		SYSFS_BASE "debug"
 #define DEBUGFS_ALTERNATE_PATH	"/debug"
@@ -901,8 +910,13 @@ errcode_t open_debugfs_file(const char *debugfs_path, const char *dirname,
 	errcode_t ret = 0;
 	char path[PATH_MAX];
 
-	ret = snprintf(path, PATH_MAX - 1, "%s/%s/%s/%s",
-		       debugfs_path, dirname, uuid, filename);
+	if (uuid)
+		ret = snprintf(path, PATH_MAX - 1, "%s/%s/%s/%s",
+			       debugfs_path, dirname, uuid, filename);
+	else
+		ret = snprintf(path, PATH_MAX - 1, "%s/%s/%s",
+			       debugfs_path, dirname, filename);
+
 	if ((ret <= 0) || (ret == (PATH_MAX - 1)))
 		return O2CB_ET_INTERNAL_FAILURE;
 
@@ -997,3 +1011,92 @@ int del_from_stringlist(char *str, struct list_head *strlist)
 	return 0;
 }
 
+errcode_t traverse_extents(ocfs2_filesys *fs, struct ocfs2_extent_list *el,
+			   FILE *out)
+{
+	struct ocfs2_extent_block *eb;
+	struct ocfs2_extent_rec *rec;
+	errcode_t ret = 0;
+	char *buf = NULL;
+	int i;
+	uint32_t clusters;
+
+	dump_extent_list(out, el);
+
+	for (i = 0; i < el->l_next_free_rec; ++i) {
+		rec = &(el->l_recs[i]);
+		clusters = ocfs2_rec_clusters(el->l_tree_depth, rec);
+
+		/*
+		 * In a unsuccessful insertion, we may shift a tree
+		 * add a new branch for it and do no insertion. So we
+		 * may meet a extent block which have
+		 * clusters == 0, this should only be happen
+		 * in the last extent rec. */
+		if (!clusters && i == el->l_next_free_rec - 1)
+			break;
+
+		if (el->l_tree_depth) {
+			ret = ocfs2_malloc_block(gbls.fs->fs_io, &buf);
+			if (ret)
+				goto bail;
+
+			ret = ocfs2_read_extent_block(fs, rec->e_blkno, buf);
+			if (ret)
+				goto bail;
+
+			eb = (struct ocfs2_extent_block *)buf;
+
+			dump_extent_block(out, eb);
+
+			ret = traverse_extents(fs, &(eb->h_list), out);
+			if (ret)
+				goto bail;
+		}
+	}
+
+bail:
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}
+
+errcode_t traverse_chains(ocfs2_filesys *fs, struct ocfs2_chain_list *cl,
+			  FILE *out)
+{
+	struct ocfs2_group_desc *grp;
+	struct ocfs2_chain_rec *rec;
+	errcode_t ret = 0;
+	char *buf = NULL;
+	uint64_t blkno;
+	int i;
+	int index;
+
+	dump_chain_list(out, cl);
+
+	ret = ocfs2_malloc_block(gbls.fs->fs_io, &buf);
+	if (ret)
+		goto bail;
+
+	for (i = 0; i < cl->cl_next_free_rec; ++i) {
+		rec = &(cl->cl_recs[i]);
+		blkno = rec->c_blkno;
+		index = 0;
+		fprintf(out, "\n");
+		while (blkno) {
+			ret = ocfs2_read_group_desc(fs, blkno, buf);
+			if (ret)
+				goto bail;
+
+			grp = (struct ocfs2_group_desc *)buf;
+			dump_group_descriptor(out, grp, index);
+			blkno = grp->bg_next_group;
+			index++;
+		}
+	}
+
+bail:
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}

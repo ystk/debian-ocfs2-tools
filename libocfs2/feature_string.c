@@ -43,9 +43,9 @@ struct feature_name {
 						   feature */
 };
 
-struct tunefs_flag_name {
-	const char	*tfn_name;
-	uint16_t	tfn_flag;
+struct flag_name {
+	const char		*fl_name;
+	uint32_t		fl_flag;
 };
 
 struct feature_level_translation {
@@ -63,7 +63,12 @@ static struct feature_level_translation ocfs2_feature_levels_table[] = {
 static ocfs2_fs_options feature_level_defaults[] = {
 	{OCFS2_FEATURE_COMPAT_BACKUP_SB | OCFS2_FEATURE_COMPAT_JBD2_SB,
 	 OCFS2_FEATURE_INCOMPAT_SPARSE_ALLOC |
-	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA,
+	 OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP |
+	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA |
+	 OCFS2_FEATURE_INCOMPAT_XATTR |
+	 OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE |
+	 OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS |
+	 OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG,
 	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN},  /* OCFS2_FEATURE_LEVEL_DEFAULT */
 
 	{OCFS2_FEATURE_COMPAT_BACKUP_SB | OCFS2_FEATURE_COMPAT_JBD2_SB,
@@ -75,8 +80,55 @@ static ocfs2_fs_options feature_level_defaults[] = {
 	 OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP |
 	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA |
 	 OCFS2_FEATURE_INCOMPAT_META_ECC |
-	 OCFS2_FEATURE_INCOMPAT_XATTR,
-	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN}, /* OCFS2_FEATURE_LEVEL_MAX_FEATURES */
+	 OCFS2_FEATURE_INCOMPAT_XATTR |
+	 OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE |
+	 OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS |
+	 OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG,
+	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN |
+	 OCFS2_FEATURE_RO_COMPAT_USRQUOTA |
+	 OCFS2_FEATURE_RO_COMPAT_GRPQUOTA }, /* OCFS2_FEATURE_LEVEL_MAX_FEATURES */
+};
+
+static ocfs2_fs_options mkfstypes_features_defaults[] = {
+	{OCFS2_FEATURE_COMPAT_BACKUP_SB | OCFS2_FEATURE_COMPAT_JBD2_SB,
+	 OCFS2_FEATURE_INCOMPAT_SPARSE_ALLOC |
+	 OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP |
+	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA |
+	 OCFS2_FEATURE_INCOMPAT_XATTR |
+	 OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE |
+	 OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS |
+	 OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG,
+	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN},  /* OCFS2_MKFSTYPE_DEFAULT */
+
+	{OCFS2_FEATURE_COMPAT_BACKUP_SB | OCFS2_FEATURE_COMPAT_JBD2_SB,
+	 OCFS2_FEATURE_INCOMPAT_SPARSE_ALLOC |
+	 OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP |
+	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA |
+	 OCFS2_FEATURE_INCOMPAT_XATTR |
+	 OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE |
+	 OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS |
+	 OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG,
+	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN},  /* OCFS2_MKFSTYPE_DATAFILES */
+
+	{OCFS2_FEATURE_COMPAT_BACKUP_SB | OCFS2_FEATURE_COMPAT_JBD2_SB,
+	 OCFS2_FEATURE_INCOMPAT_SPARSE_ALLOC |
+	 OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP |
+	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA |
+	 OCFS2_FEATURE_INCOMPAT_XATTR |
+	 OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE |
+	 OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS |
+	 OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG,
+	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN},  /* OCFS2_MKFSTYPE_MAIL */
+
+	{OCFS2_FEATURE_COMPAT_BACKUP_SB | OCFS2_FEATURE_COMPAT_JBD2_SB,
+	 OCFS2_FEATURE_INCOMPAT_SPARSE_ALLOC |
+	 OCFS2_FEATURE_INCOMPAT_EXTENDED_SLOT_MAP |
+	 OCFS2_FEATURE_INCOMPAT_INLINE_DATA |
+	 OCFS2_FEATURE_INCOMPAT_XATTR |
+	 OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE |
+	 OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS |
+	 OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG,
+	 OCFS2_FEATURE_RO_COMPAT_UNWRITTEN},  /* OCFS2_MKFSTYPE_VMSTORE */
 };
 
 /* These are the features we support in mkfs/tunefs via --fs-features */
@@ -121,6 +173,36 @@ static struct fs_feature_flags ocfs2_supported_features[] = {
 		"xattr",
 		{0, OCFS2_FEATURE_INCOMPAT_XATTR, 0},
 		{0, OCFS2_FEATURE_INCOMPAT_XATTR, 0},
+	},
+	{
+		"indexed-dirs",
+		{0, OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS, 0},
+		{0, OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS, 0},
+	},
+	{
+		"usrquota",
+		{0, 0, OCFS2_FEATURE_RO_COMPAT_USRQUOTA},
+		{0, 0, OCFS2_FEATURE_RO_COMPAT_USRQUOTA},
+	},
+	{
+		"grpquota",
+		{0, 0, OCFS2_FEATURE_RO_COMPAT_GRPQUOTA},
+		{0, 0, OCFS2_FEATURE_RO_COMPAT_GRPQUOTA},
+	},
+	{
+		"refcount",
+		{0, OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE, 0},
+		{0, OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE, 0},
+	},
+	{
+		"discontig-bg",
+		{0, OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG, 0},
+		{0, OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG, 0},
+	},
+	{
+		"clusterinfo",
+		{0, OCFS2_FEATURE_INCOMPAT_CLUSTERINFO, 0},
+		{0, OCFS2_FEATURE_INCOMPAT_CLUSTERINFO, 0},
 	},
 	{
 		NULL,
@@ -190,6 +272,30 @@ static struct feature_name ocfs2_feature_names[] = {
 		.fn_flag = {0, OCFS2_FEATURE_INCOMPAT_XATTR, 0},
 	},
 	{
+		.fn_name = "indexed-dirs",
+		.fn_flag = {0, OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS, 0},
+	},
+	{
+		.fn_name = "usrquota",
+		.fn_flag = {0, 0, OCFS2_FEATURE_RO_COMPAT_USRQUOTA},
+	},
+	{
+		.fn_name = "grpquota",
+		.fn_flag = {0, 0, OCFS2_FEATURE_RO_COMPAT_GRPQUOTA},
+	},
+	{
+		.fn_name = "refcount",
+		.fn_flag = {0, OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE, 0},
+	},
+	{
+		.fn_name = "discontig-bg",
+		.fn_flag = {0, OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG, 0},
+	},
+	{
+		.fn_name = "clusterinfo",
+		.fn_flag = {0, OCFS2_FEATURE_INCOMPAT_CLUSTERINFO, 0},
+	},
+	{
 		.fn_name = NULL,
 	},
 };
@@ -200,17 +306,67 @@ static struct feature_name ocfs2_feature_names[] = {
  *
  * These MUST be kept in sync with the flags in ocfs2_fs.h.
  */
-static struct tunefs_flag_name ocfs2_tunefs_flag_names[] = {
+static struct flag_name ocfs2_tunefs_flag_names[] = {
 	{
-		.tfn_name = "remove-slot",
-		.tfn_flag = OCFS2_TUNEFS_INPROG_REMOVE_SLOT,
+		.fl_name = "remove-slot",
+		.fl_flag = OCFS2_TUNEFS_INPROG_REMOVE_SLOT,
 	},
 	{
-		.tfn_name = "dir-trailer",
-		.tfn_flag = OCFS2_TUNEFS_INPROG_DIR_TRAILER,
+		.fl_name = "dir-trailer",
+		.fl_flag = OCFS2_TUNEFS_INPROG_DIR_TRAILER,
 	},
 	{
-		.tfn_name = NULL,
+		.fl_name = NULL,
+	},
+};
+
+/*
+ * The printable names of every flag in e_flags.  If libocfs2 supports the
+ * flag, its name must be here.
+ *
+ * These MUST be kept in sync with the flags in ocfs2_fs.h.
+ */
+static struct flag_name ocfs2_extent_flag_names[] = {
+	{
+		.fl_name = "Unwritten",
+		.fl_flag = OCFS2_EXT_UNWRITTEN,
+	},
+	{
+		.fl_name = "Refcounted",
+		.fl_flag = OCFS2_EXT_REFCOUNTED,
+	},
+	{
+		.fl_name = NULL,
+	},
+};
+
+/*
+ * The printable names of every flag in rf_flags.  If libocfs2 supports the
+ * flag, its name must be here.
+ *
+ * These MUST be kept in sync with the flags in ocfs2_fs.h.
+ */
+static struct flag_name ocfs2_refcount_flag_names[] = {
+	{
+		.fl_name = "Leaf",
+		.fl_flag = OCFS2_REFCOUNT_LEAF_FL,
+	},
+	{
+		.fl_name = "Tree",
+		.fl_flag = OCFS2_REFCOUNT_TREE_FL,
+	},
+	{
+		.fl_name = NULL,
+	},
+};
+
+static struct flag_name ocfs2_cluster_o2cb_flag_names[] = {
+	{
+		.fl_name = "Globalheartbeat",
+		.fl_flag = OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT,
+	},
+	{
+		.fl_name = NULL,
 	},
 };
 
@@ -316,7 +472,9 @@ errcode_t ocfs2_snprint_feature_flags(char *str, size_t size,
 	return err;
 }
 
-errcode_t ocfs2_snprint_tunefs_flags(char *str, size_t size, uint16_t flags)
+static errcode_t ocfs2_snprint_flag_names(struct flag_name *flag_names,
+					  char *str, size_t size,
+					  uint32_t flags)
 {
 	int i, printed;
 	char *ptr = str;
@@ -325,14 +483,14 @@ errcode_t ocfs2_snprint_tunefs_flags(char *str, size_t size, uint16_t flags)
 	char *sep = " ";
 	uint16_t found = 0;
 
-	for (i = 0; ocfs2_tunefs_flag_names[i].tfn_name; i++) {
-		if (!(flags & ocfs2_tunefs_flag_names[i].tfn_flag))
+	for (i = 0; flag_names[i].fl_name; i++) {
+		if (!(flags & flag_names[i].fl_flag))
 			continue;
-		found |= ocfs2_tunefs_flag_names[i].tfn_flag;
+		found |= flag_names[i].fl_flag;
 
 		printed = snprintf(ptr, remain, "%s%s",
 				   ptr == str ? "" : sep,
-				   ocfs2_tunefs_flag_names[i].tfn_name);
+				   flag_names[i].fl_name);
 		if (printed < 0)
 			err = OCFS2_ET_INTERNAL_FAILURE;
 		else if (printed >= remain)
@@ -358,6 +516,30 @@ errcode_t ocfs2_snprint_tunefs_flags(char *str, size_t size, uint16_t flags)
 	return err;
 }
 
+errcode_t ocfs2_snprint_tunefs_flags(char *str, size_t size, uint16_t flags)
+{
+	return ocfs2_snprint_flag_names(ocfs2_tunefs_flag_names,
+					str, size, (uint32_t)flags);
+}
+
+errcode_t ocfs2_snprint_extent_flags(char *str, size_t size, uint8_t flags)
+{
+	return ocfs2_snprint_flag_names(ocfs2_extent_flag_names,
+					str, size, (uint32_t)flags);
+}
+
+errcode_t ocfs2_snprint_refcount_flags(char *str, size_t size, uint8_t flags)
+{
+	return ocfs2_snprint_flag_names(ocfs2_refcount_flag_names,
+					str, size, (uint32_t)flags);
+}
+
+errcode_t ocfs2_snprint_cluster_o2cb_flags(char *str, size_t size,
+					   uint8_t flags)
+{
+	return ocfs2_snprint_flag_names(ocfs2_cluster_o2cb_flag_names,
+					str, size, (uint32_t)flags);
+}
 
 /*
  * If we are asked to clear a feature, we also need to clear any other
@@ -385,11 +567,17 @@ static void ocfs2_feature_clear_deps(ocfs2_fs_options *reverse_set)
  * reverse_set: all the features a user want to clear by "--fs-features".
  */
 errcode_t ocfs2_merge_feature_flags_with_level(ocfs2_fs_options *dest,
+					       enum ocfs2_mkfs_types fstype,
 					       int level,
 					       ocfs2_fs_options *feature_set,
 					       ocfs2_fs_options *reverse_set)
 {
-	ocfs2_fs_options level_set = feature_level_defaults[level];
+	ocfs2_fs_options level_set;
+
+	if (level == OCFS2_FEATURE_LEVEL_DEFAULT)
+		level_set = mkfstypes_features_defaults[fstype];
+	else
+		level_set = feature_level_defaults[level];
 
 	/*
 	 * Ensure that all dependancies are correct in the reverse set.
@@ -631,7 +819,42 @@ static void print_tunefs_flags(void)
 	fprintf(stdout, "Printable s_tunefs_flag:\n");
 
 	err = ocfs2_snprint_tunefs_flags(buf, PATH_MAX,
-					 OCFS2_TUNEFS_INPROG_REMOVE_SLOT);
+					 OCFS2_TUNEFS_INPROG_REMOVE_SLOT |
+					 OCFS2_TUNEFS_INPROG_DIR_TRAILER);
+	if (err)
+		snprintf(buf, PATH_MAX, "An error occurred: %s",
+			 error_message(err));
+	fprintf(stdout, "FLAGS:\t\t%s\n", buf);
+	fprintf(stdout, "\n");
+}
+
+static void print_extent_flags(void)
+{
+	errcode_t err;
+	char buf[PATH_MAX];
+
+	fprintf(stdout, "Printable e_flags:\n");
+
+	err = ocfs2_snprint_extent_flags(buf, PATH_MAX,
+					 OCFS2_EXT_UNWRITTEN |
+					 OCFS2_EXT_REFCOUNTED);
+	if (err)
+		snprintf(buf, PATH_MAX, "An error occurred: %s",
+			 error_message(err));
+	fprintf(stdout, "FLAGS:\t\t%s\n", buf);
+	fprintf(stdout, "\n");
+}
+
+static void print_refcount_flags(void)
+{
+	errcode_t err;
+	char buf[PATH_MAX];
+
+	fprintf(stdout, "Printable rf_flags:\n");
+
+	err = ocfs2_snprint_refcount_flags(buf, PATH_MAX,
+					   OCFS2_REFCOUNT_TREE_FL |
+					   OCFS2_REFCOUNT_LEAF_FL);
 	if (err)
 		snprintf(buf, PATH_MAX, "An error occurred: %s",
 			 error_message(err));
@@ -717,7 +940,9 @@ int main(int argc, char *argv[])
 	}
 
 	memset(&mkfs_features, 0, sizeof(ocfs2_fs_options));
-	err = ocfs2_merge_feature_flags_with_level(&mkfs_features, level,
+	err = ocfs2_merge_feature_flags_with_level(&mkfs_features,
+						   OCFS2_MKFSTYPE_DEFAULT,
+						   level,
 						   &set_features,
 						   &clear_features);
 	if (err) {
@@ -738,6 +963,8 @@ int main(int argc, char *argv[])
 	print_order(1, &clear_features);
 
 	print_tunefs_flags();
+	print_extent_flags();
+	print_refcount_flags();
 
 	return 0;
 }

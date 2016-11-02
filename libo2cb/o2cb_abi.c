@@ -29,13 +29,21 @@
 #include <sys/ioctl.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
+#include <sys/wait.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
+#include <ctype.h>
 
 #include <linux/types.h>
+#ifdef HAVE_CMAP
+#include <corosync/cmap.h>
+#endif
+#ifdef HAVE_FSDLM
+#include <libdlm.h>
+#endif
 
 #include "o2cb/o2cb.h"
 #include "o2cb/o2cb_client_proto.h"
@@ -46,7 +54,11 @@
 #define LOCKING_PROTOCOL_FILE	"/sys/fs/ocfs2/max_locking_protocol"
 #define OCFS2_STACK_LABEL_LEN	4
 #define CONTROL_DEVICE		"/dev/misc/ocfs2_control"
+#define DLM_RECOVER_CALLBACK   "/sys/fs/ocfs2/dlm_recover_callback_support"
 
+static errcode_t o2cb_validate_cluster_name(struct o2cb_cluster_desc *desc);
+static errcode_t o2cb_validate_cluster_flags(struct o2cb_cluster_desc *desc,
+					     int *globalhb);
 
 struct o2cb_stack_ops {
 	errcode_t (*list_clusters)(char ***clusters);
@@ -107,6 +119,20 @@ static int control_device_fd = -1;
 
 static char *configfs_path;
 
+static char *do_strchomp(char *str)
+{
+	int len = strlen(str);
+	char *p;
+
+	if (!len)
+		return str;
+
+	p = str + len - 1;
+	while (isspace(*p) && len--)
+		*p-- = '\0';
+
+	return str;
+}
 
 static ssize_t read_single_line_file(const char *file, char *line,
 				     size_t count)
@@ -125,6 +151,22 @@ static ssize_t read_single_line_file(const char *file, char *line,
 	return ret;
 }
 
+static int write_single_line_file(char *filename, char *line, size_t count)
+{
+	ssize_t ret = 0;
+	FILE *f;
+
+	f = fopen(filename, "w");
+	if (f) {
+		if (fputs(line, f))
+			ret = strlen(line);
+		fclose(f);
+	} else
+		ret = -errno;
+
+	return ret;
+}
+
 static ssize_t read_stack_file(char *line, size_t count)
 {
 	return read_single_line_file(CLUSTER_STACK_FILE, line, count);
@@ -135,7 +177,9 @@ static errcode_t determine_stack(void)
 	ssize_t len;
 	char line[100];
 	errcode_t err = O2CB_ET_SERVICE_UNAVAILABLE;
+	int setup_performed = 0;
 
+redo:
 	len = read_stack_file(line, sizeof(line));
 	if (len > 0) {
 		if (line[len - 1] == '\n') {
@@ -155,8 +199,11 @@ static errcode_t determine_stack(void)
 			err = 0;
 		}
 	} else if (len == -ENOENT) {
-		current_stack = &classic_stack;
-		err = 0;
+		if (!setup_performed) {
+			o2cb_setup_stack(OCFS2_CLASSIC_CLUSTER_STACK);
+			setup_performed = 1;
+			goto redo;
+		}
 	}
 
 	return err;
@@ -1178,16 +1225,49 @@ out:
 	return err;
 }
 
-/* For ref counting purposes, we need to know whether this process
- * called o2cb_create_heartbeat_region_disk. If it did, then we want
- * to drop the reference taken during startup, otherwise that
- * reference was dropped automatically at process shutdown so there's
- * no need to drop one here. */
-static errcode_t classic_group_leave(struct o2cb_cluster_desc *cluster,
-				     struct o2cb_region_desc *region)
+errcode_t o2cb_start_heartbeat(struct o2cb_cluster_desc *cluster,
+			       struct o2cb_region_desc *region)
 {
 	errcode_t ret, up_ret;
-	int hb_refs;
+	int semid, global = 0;
+
+	ret = o2cb_mutex_down_lookup(region->r_name, &semid);
+	if (ret)
+		return ret;
+
+	ret = o2cb_global_heartbeat_mode(cluster->c_cluster, &global);
+	if (ret)
+		goto up;
+
+	ret = o2cb_create_heartbeat_region(cluster->c_cluster,
+					   region->r_name,
+					   region->r_device_name,
+					   region->r_block_bytes,
+					   region->r_start_block,
+					   region->r_blocks);
+	if (ret && ret != O2CB_ET_REGION_EXISTS)
+		goto up;
+
+	if (global && ret == O2CB_ET_REGION_EXISTS) {
+		ret = 0;
+		goto up;
+	}
+
+	ret = __o2cb_get_ref(semid, !region->r_persist);
+	/* XXX: Maybe stop heartbeat on error here? */
+up:
+	up_ret = o2cb_mutex_up(semid);
+	if (up_ret && !ret)
+		ret = up_ret;
+
+	return ret;
+}
+
+errcode_t o2cb_stop_heartbeat(struct o2cb_cluster_desc *cluster,
+			      struct o2cb_region_desc *region)
+{
+	errcode_t ret, up_ret;
+	int hb_refs = 0;
 	int semid;
 
 	ret = o2cb_mutex_down_lookup(region->r_name, &semid);
@@ -1232,34 +1312,57 @@ up:
 
 done:
 	return ret;
+
 }
 
+/* For ref counting purposes, we need to know whether this process
+ * called o2cb_create_heartbeat_region_disk. If it did, then we want
+ * to drop the reference taken during startup, otherwise that
+ * reference was dropped automatically at process shutdown so there's
+ * no need to drop one here. */
+static errcode_t classic_group_leave(struct o2cb_cluster_desc *cluster,
+				     struct o2cb_region_desc *region)
+{
+	errcode_t ret;
+	int globalhb;
+
+	ret = o2cb_validate_cluster_name(cluster);
+	if (ret)
+		goto bail;
+
+	ret = o2cb_validate_cluster_flags(cluster, &globalhb);
+	if (ret)
+		goto bail;
+
+	if (!globalhb)
+		ret = o2cb_stop_heartbeat(cluster, region);
+
+bail:
+	return ret;
+}
+
+/*
+ * Cluster stack is validated in o2cb_begin_group_join(). Here we validate
+ * the cluster name and the cluster flags (aka heartbeat mode).
+ */
 static errcode_t classic_begin_group_join(struct o2cb_cluster_desc *cluster,
 					  struct o2cb_region_desc *region)
 {
-	errcode_t ret, up_ret;
-	int semid;
+	errcode_t ret;
+	int globalhb;
 
-	ret = o2cb_mutex_down_lookup(region->r_name, &semid);
+	ret = o2cb_validate_cluster_name(cluster);
 	if (ret)
-		return ret;
+		goto bail;
 
-	ret = o2cb_create_heartbeat_region(cluster->c_cluster,
-					   region->r_name,
-					   region->r_device_name,
-					   region->r_block_bytes,
-					   region->r_start_block,
-					   region->r_blocks);
-	if (ret && ret != O2CB_ET_REGION_EXISTS)
-		goto up;
+	ret = o2cb_validate_cluster_flags(cluster, &globalhb);
+	if (ret)
+		goto bail;
 
-	ret = __o2cb_get_ref(semid, !region->r_persist);
-	/* XXX: Maybe stop heartbeat on error here? */
-up:
-	up_ret = o2cb_mutex_up(semid);
-	if (up_ret && !ret)
-		ret = up_ret;
+	if (!globalhb)
+		ret = o2cb_start_heartbeat(cluster, region);
 
+bail:
 	return ret;
 }
 
@@ -1306,6 +1409,26 @@ static errcode_t user_begin_group_join(struct o2cb_cluster_desc *cluster,
 	client_message message;
 	char *argv[OCFS2_CONTROLD_MAXARGS + 1];
 	char buf[OCFS2_CONTROLD_MAXLINE];
+
+#ifdef HAVE_FSDLM
+	uint32_t maj, min, pat;
+
+	if (strncmp(cluster->c_stack, OCFS2_PCMK_CLUSTER_STACK, OCFS2_STACK_LABEL_LEN))
+			goto no_pcmk;
+
+	rc = dlm_kernel_version(&maj, &min, &pat);
+
+	if (rc < 0)
+		return O2CB_ET_SERVICE_UNAVAILABLE;
+
+	if (read_single_line_file(DLM_RECOVER_CALLBACK, buf, 3) > 0) {
+		/* Controld is not required */
+		if (maj < 6)
+			return O2CB_ET_INTERNAL_FAILURE;
+		return 0;
+	}
+no_pcmk:
+#endif
 
 	if (control_daemon_fd != -1) {
 		/* fprintf(stderr, "Join already in progress!\n"); */
@@ -1398,6 +1521,13 @@ static errcode_t user_complete_group_join(struct o2cb_cluster_desc *cluster,
 	char *argv[OCFS2_CONTROLD_MAXARGS + 1];
 	char buf[OCFS2_CONTROLD_MAXLINE];
 
+#ifdef HAVE_FSDLM
+	if (read_single_line_file(DLM_RECOVER_CALLBACK, buf, 3) > 0) {
+		/* Controld is not required */
+		return 0;
+	}
+#endif
+
 	if (control_daemon_fd == -1) {
 		/* fprintf(stderr, "Join not started!\n"); */
 		err = O2CB_ET_SERVICE_UNAVAILABLE;
@@ -1467,6 +1597,13 @@ static errcode_t user_group_leave(struct o2cb_cluster_desc *cluster,
 	client_message message;
 	char *argv[OCFS2_CONTROLD_MAXARGS + 1];
 	char buf[OCFS2_CONTROLD_MAXLINE];
+
+#ifdef HAVE_FSDLM
+	if (read_single_line_file(DLM_RECOVER_CALLBACK, buf, 3) > 0) {
+		/* Controld is not required */
+		return 0;
+	}
+#endif
 
 	if (control_daemon_fd != -1) {
 		/* fprintf(stderr, "Join in progress!\n"); */
@@ -1546,7 +1683,45 @@ out:
 	return err;
 }
 
-static errcode_t o2cb_validate_cluster_desc(struct o2cb_cluster_desc *desc)
+static errcode_t o2cb_validate_cluster_flags(struct o2cb_cluster_desc *desc,
+					     int *globalhb)
+{
+	errcode_t ret;
+	int disk_mode = 0;
+
+	ret = o2cb_global_heartbeat_mode(desc->c_cluster, globalhb);
+	if (ret)
+		goto bail;
+
+	disk_mode = !!(desc->c_flags & OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT);
+
+	if (disk_mode != *globalhb)
+		ret = O2CB_ET_INVALID_HEARTBEAT_MODE;
+
+bail:
+	return ret;
+}
+
+static errcode_t o2cb_validate_cluster_name(struct o2cb_cluster_desc *desc)
+{
+	errcode_t ret;
+	char **clusters = NULL;
+
+	ret = o2cb_list_clusters(&clusters);
+	if (ret)
+		goto bail;
+
+	/* The first cluster is the default cluster */
+	if (!clusters[0] || strcmp(clusters[0], desc->c_cluster))
+		ret = O2CB_ET_INVALID_CLUSTER_NAME;
+
+	o2cb_free_cluster_list(clusters);
+
+bail:
+	return ret;
+}
+
+static errcode_t o2cb_validate_cluster_stack(struct o2cb_cluster_desc *desc)
 {
 	errcode_t err;
 	const char *name;
@@ -1580,7 +1755,7 @@ errcode_t o2cb_begin_group_join(struct o2cb_cluster_desc *cluster,
 	if (!current_stack)
 		return O2CB_ET_SERVICE_UNAVAILABLE;
 
-	err = o2cb_validate_cluster_desc(cluster);
+	err = o2cb_validate_cluster_stack(cluster);
 	if (err)
 		return err;
 
@@ -1606,7 +1781,7 @@ errcode_t o2cb_complete_group_join(struct o2cb_cluster_desc *cluster,
 	if (!current_stack)
 		return O2CB_ET_SERVICE_UNAVAILABLE;
 
-	err = o2cb_validate_cluster_desc(cluster);
+	err = o2cb_validate_cluster_stack(cluster);
 	if (err)
 		return err;
 
@@ -1632,7 +1807,7 @@ errcode_t o2cb_group_leave(struct o2cb_cluster_desc *cluster,
 	if (!current_stack)
 		return O2CB_ET_SERVICE_UNAVAILABLE;
 
-	err = o2cb_validate_cluster_desc(cluster);
+	err = o2cb_validate_cluster_stack(cluster);
 	if (err)
 		return err;
 
@@ -1650,9 +1825,9 @@ errcode_t o2cb_group_leave(struct o2cb_cluster_desc *cluster,
 void o2cb_free_cluster_desc(struct o2cb_cluster_desc *cluster)
 {
 	if (cluster->c_stack)
-		free(cluster->c_stack);
+		ocfs2_free(&cluster->c_stack);
 	if (cluster->c_cluster)
-		free(cluster->c_cluster);
+		ocfs2_free(&cluster->c_cluster);
 }
 
 errcode_t o2cb_running_cluster_desc(struct o2cb_cluster_desc *cluster)
@@ -1660,38 +1835,53 @@ errcode_t o2cb_running_cluster_desc(struct o2cb_cluster_desc *cluster)
 	errcode_t err;
 	const char *stack;
 	char **clusters = NULL;
+	int globalhb;
 
+	cluster->c_stack = NULL;
+	cluster->c_cluster = NULL;
+	cluster->c_flags = 0;
+
+	/* c_stack */
 	err = o2cb_get_stack_name(&stack);
 	if (err)
-		return err;
+		goto out;
 
-	if (!strcmp(stack, classic_stack.s_name)) {
-		cluster->c_stack = NULL;
-		cluster->c_cluster = NULL;
-		return 0;
-	}
-
+	err = O2CB_ET_NO_MEMORY;
 	cluster->c_stack = strdup(stack);
 	if (!cluster->c_stack)
-		return O2CB_ET_NO_MEMORY;
+		goto out;
 
+	/* c_cluster */
 	err = o2cb_list_clusters(&clusters);
-	if (err) {
-		free(cluster->c_stack);
-		return err;
-	}
+	if (err)
+		goto out;
 
 	/* The first cluster is the default cluster */
-	if (clusters[0]) {
+	if (!clusters[0])
+		err = O2CB_ET_SERVICE_UNAVAILABLE;
+	else {
 		cluster->c_cluster = strdup(clusters[0]);
-		if (!cluster->c_cluster) {
-			free(cluster->c_stack);
+		if (!cluster->c_cluster)
 			err = O2CB_ET_NO_MEMORY;
-		}
 	}
-	o2cb_free_cluster_list(clusters);
+	if (err)
+		goto out;
 
-	return 0;
+	/* c_flags */
+	err = o2cb_global_heartbeat_mode(cluster->c_cluster, &globalhb);
+	if (err)
+		goto out;
+
+	if (globalhb)
+		cluster->c_flags |= OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT;
+
+out:
+	if (clusters)
+		o2cb_free_cluster_list(clusters);
+	if (err)
+		o2cb_free_cluster_desc(cluster);
+
+	return err;
 }
 
 static inline int is_dots(const char *name)
@@ -1835,6 +2025,30 @@ static errcode_t classic_list_clusters(char ***clusters)
 	return o2cb_list_dir(path, clusters);
 }
 
+#ifdef HAVE_CMAP
+static errcode_t user_list_clusters(char ***clusters)
+{
+	cmap_handle_t handle;
+	char **list;
+	int rv;
+
+	rv = cmap_initialize(&handle);
+	if (rv != CS_OK)
+		return O2CB_ET_SERVICE_UNAVAILABLE;
+
+	/* We supply only one cluster_name */
+	list = (char **)malloc(sizeof(char *) * 2);
+	rv = cmap_get_string(handle, "totem.cluster_name", &list[0]);
+	if (rv != CS_OK) {
+		free(list);
+		return O2CB_ET_INTERNAL_FAILURE;
+	}
+
+	list[1] = NULL;
+	*clusters = list;
+	return 0;
+}
+#else
 static errcode_t user_list_clusters(char ***clusters)
 {
 	errcode_t err = O2CB_ET_SERVICE_UNAVAILABLE;
@@ -1884,6 +2098,7 @@ out:
 
 	return err;
 }
+#endif
 
 errcode_t o2cb_list_clusters(char ***clusters)
 {
@@ -1917,6 +2132,97 @@ errcode_t o2cb_list_nodes(char *cluster_name, char ***nodes)
 void o2cb_free_nodes_list(char **nodes)
 {
 	o2cb_free_dir_list(nodes);
+}
+
+errcode_t o2cb_list_hb_regions(char *cluster_name, char ***regions)
+{
+	char path[PATH_MAX];
+	errcode_t ret;
+
+	if (configfs_path == NULL)
+		return O2CB_ET_SERVICE_UNAVAILABLE;
+
+	ret = snprintf(path, PATH_MAX - 1, O2CB_FORMAT_HEARTBEAT_DIR,
+		       configfs_path, cluster_name);
+	if ((ret <= 0) || (ret == (PATH_MAX - 1)))
+		return O2CB_ET_INTERNAL_FAILURE;
+
+	return o2cb_list_dir(path, regions);
+}
+
+void o2cb_free_hb_regions_list(char **regions)
+{
+	o2cb_free_dir_list(regions);
+}
+
+errcode_t o2cb_global_heartbeat_mode(char *cluster_name, int *global)
+{
+	char attr_path[PATH_MAX];
+	char _fake_cluster_name[NAME_MAX];
+	char attr_value[16];
+	errcode_t ret;
+
+	if (!cluster_name) {
+		ret = _fake_default_cluster(_fake_cluster_name);
+		if (ret)
+			return ret;
+		cluster_name = _fake_cluster_name;
+	}
+
+	ret = snprintf(attr_path, PATH_MAX - 1, O2CB_FORMAT_HEARTBEAT_MODE,
+		       configfs_path, cluster_name);
+	if ((ret <= 0) || (ret == (PATH_MAX - 1)))
+		return O2CB_ET_INTERNAL_FAILURE;
+
+	*global = 0;
+
+	ret = o2cb_get_attribute(attr_path, attr_value, sizeof(attr_value) - 1);
+	if (ret) {
+		if (ret == O2CB_ET_SERVICE_UNAVAILABLE)
+			ret = 0;
+		return ret;
+	}
+
+	/* wipeout the last newline character */
+	do_strchomp(attr_value);
+
+	if (!strcmp(attr_value, O2CB_GLOBAL_HEARTBEAT_TAG))
+		*global = 1;
+
+	return 0;
+
+}
+
+/*
+ * The hbmode validation is done in the kernel
+ */
+errcode_t o2cb_set_heartbeat_mode(char *cluster_name, char *hbmode)
+{
+	char attr_path[PATH_MAX];
+	char _fake_cluster_name[NAME_MAX];
+	errcode_t ret;
+	int local = 0;
+
+	if (!cluster_name) {
+		ret = _fake_default_cluster(_fake_cluster_name);
+		if (ret)
+			return ret;
+		cluster_name = _fake_cluster_name;
+	}
+
+	if (!strcmp(hbmode, O2CB_LOCAL_HEARTBEAT_TAG))
+		local = 1;
+
+	ret = snprintf(attr_path, PATH_MAX - 1, O2CB_FORMAT_HEARTBEAT_MODE,
+		       configfs_path, cluster_name);
+	if ((ret <= 0) || (ret == (PATH_MAX - 1)))
+		return O2CB_ET_INTERNAL_FAILURE;
+
+	ret = o2cb_set_attribute(attr_path, hbmode);
+	if (ret && ret == O2CB_ET_SERVICE_UNAVAILABLE && local)
+		ret = 0;
+
+	return ret;
 }
 
 static errcode_t dump_list_to_string(char **dump_list, char **debug)
@@ -2045,6 +2351,60 @@ errcode_t o2cb_get_node_num(const char *cluster_name, const char *node_name,
 	return 0;
 }
 
+errcode_t o2cb_get_node_port(const char *cluster_name, const char *node_name,
+			     uint32_t *ip_port)
+{
+	char val[30];
+	char *p;
+	errcode_t ret;
+
+	ret = o2cb_get_node_attribute(cluster_name, node_name, "ipv4_port",
+				      val, sizeof(val));
+	if (ret)
+		return ret;
+
+	*ip_port = strtoul(val, &p, 0);
+	if (!p || (*p && *p != '\n'))
+		return O2CB_ET_SERVICE_UNAVAILABLE;
+
+	return 0;
+}
+
+errcode_t o2cb_get_node_ip_string(const char *cluster_name,
+				  const char *node_name,
+				  char *ip_address, int count)
+{
+	errcode_t ret;
+
+	ret = o2cb_get_node_attribute(cluster_name, node_name, "ipv4_address",
+				      ip_address, count - 1);
+	if (ret)
+		return ret;
+
+	/* wipeout the last newline character */
+	do_strchomp(ip_address);
+
+	return 0;
+}
+
+errcode_t o2cb_get_node_local(const char *cluster_name, const char *node_name,
+			      uint32_t *local)
+{
+	char val[30];
+	char *p;
+	errcode_t ret;
+
+	ret = o2cb_get_node_attribute(cluster_name, node_name, "local",
+				      val, sizeof(val));
+	if (ret)
+		return ret;
+
+	*local = strtoul(val, &p, 0);
+	if (!p || (*p && *p != '\n'))
+		return O2CB_ET_SERVICE_UNAVAILABLE;
+
+	return 0;
+}
 /*
  * The handshake is pretty simple.  We need to read all supported control
  * device protocols from the kernel.  Once we've read them, we can write
@@ -2243,4 +2603,93 @@ errcode_t o2cb_get_hb_ctl_path(char *buf, int count)
 	close(fd);
 
 	return 0;
+}
+
+#define MODPROBE_COMMAND	"/sbin/modprobe"
+#define USER_KERNEL_MODULE	"ocfs2_stack_user"
+#define O2CB_KERNEL_MODULE	"ocfs2_stack_o2cb"
+
+static int perform_modprobe(char *module_name)
+{
+	pid_t child;
+	int child_status;
+
+	char *argv[3];
+
+	argv[0] = MODPROBE_COMMAND;
+	argv[1] = module_name;
+	argv[2] = NULL;
+
+	child = fork();
+	if (child == 0) {
+		execv(MODPROBE_COMMAND, argv);
+		/* If execv fails, we have a problem */
+		return -EINVAL;
+	} else
+		wait(&child_status);
+
+	return child_status;
+}
+
+errcode_t o2cb_setup_stack(char *stack_name)
+{
+	char line[64];
+	int modprobe_performed = 0, write_performed = 0;
+	errcode_t err = O2CB_ET_SERVICE_UNAVAILABLE;
+	int len;
+
+redo:
+	len = read_single_line_file(CLUSTER_STACK_FILE, line, sizeof(line));
+
+	if (len > 0) {
+		if (line[len - 1] == '\n') {
+			line[len - 1] = '\0';
+			len--;
+		}
+
+		if (len != OCFS2_STACK_LABEL_LEN) {
+			err = O2CB_ET_INTERNAL_FAILURE;
+			goto out;
+		}
+
+		if (!strncmp(line, stack_name, OCFS2_STACK_LABEL_LEN)) {
+			err = 0;
+			goto out;
+		}
+
+		if (!write_performed) {
+			len = write_single_line_file(CLUSTER_STACK_FILE,
+					stack_name, strlen(stack_name));
+			if (len < 0)
+				goto out;
+			write_performed = 1;
+			goto redo;
+		}
+
+	} else if (len == -ENOENT) {
+		if (!modprobe_performed) {
+			perform_modprobe("ocfs2");
+			if ((!strncmp(stack_name, OCFS2_PCMK_CLUSTER_STACK,
+						OCFS2_STACK_LABEL_LEN)) ||
+				(!strncmp(stack_name, OCFS2_CMAN_CLUSTER_STACK,
+						OCFS2_STACK_LABEL_LEN)))
+				perform_modprobe(USER_KERNEL_MODULE);
+			else if (!strncmp(stack_name, classic_stack.s_name,
+						OCFS2_STACK_LABEL_LEN))
+				perform_modprobe(O2CB_KERNEL_MODULE);
+
+			write_single_line_file(CLUSTER_STACK_FILE, stack_name,
+					OCFS2_STACK_LABEL_LEN);
+			write_performed = 1;
+			goto redo;
+		} else
+			err = O2CB_ET_INTERNAL_FAILURE;
+	} else {
+		err = O2CB_ET_INTERNAL_FAILURE;
+		goto out;
+	}
+
+	err = 0;
+out:
+	return err;
 }

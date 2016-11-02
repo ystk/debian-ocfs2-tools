@@ -1,0 +1,14 @@
+
+The following files have been copied from util-linux-2.12p/mount:
+	fstab.[ch]
+	mntent.[ch]
+	mount_constants.h
+	paths.h
+	realpath.[ch]
+	sundries.[ch]
+	xmalloc.[ch]
+
+The following files have code which has been copied from one or more files
+in util-linux-2.12p/mount: 
+	opts.[ch]
+	nls.h

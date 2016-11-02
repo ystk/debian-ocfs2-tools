@@ -51,11 +51,13 @@
 #include <ocfs2-kernel/kernel-list.h>
 #include <ocfs2-kernel/sparse_endian_types.h>
 #include <ocfs2-kernel/ocfs2_fs.h>
+#include <ocfs2-kernel/quota_tree.h>
 #include <o2dlm/o2dlm.h>
 #include <o2cb/o2cb.h>
 #include <ocfs2/ocfs2_err.h>
 #include <ocfs2/jbd2.h>
 #include <ocfs2-kernel/ocfs2_lockid.h>
+#include <ocfs2-kernel/ocfs2_ioctl.h>
 
 #define OCFS2_LIB_FEATURE_INCOMPAT_SUPP		(OCFS2_FEATURE_INCOMPAT_SUPP | \
 						 OCFS2_FEATURE_INCOMPAT_HEARTBEAT_DEV | \
@@ -87,6 +89,11 @@
 #define OCFS2_FLAG_HEARTBEAT_DEV_OK	0x40
 #define OCFS2_FLAG_STRICT_COMPAT_CHECK	0x80
 #define OCFS2_FLAG_IMAGE_FILE	      0x0100
+#define OCFS2_FLAG_NO_ECC_CHECKS      0x0200	/* Do not validate metaecc
+						 * information on block
+						 * reads. */
+#define OCFS2_FLAG_HARD_RO            0x0400
+
 
 /* Return flags for the directory iterator functions */
 #define OCFS2_DIRENT_CHANGED	0x01
@@ -126,15 +133,49 @@
 #define OCFS2_CHB_WAITING	2
 #define OCFS2_CHB_COMPLETE	3
 
+/* Flags for global quotafile info */
+#define OCFS2_QF_INFO_DIRTY 1
+#define OCFS2_QF_INFO_LOADED 2
+
 typedef void (*ocfs2_chb_notify)(int state, char *progress, void *data);
 
 typedef struct _ocfs2_filesys ocfs2_filesys;
 typedef struct _ocfs2_cached_inode ocfs2_cached_inode;
+typedef struct _ocfs2_cached_dquot ocfs2_cached_dquot;
 typedef struct _io_channel io_channel;
 typedef struct _ocfs2_inode_scan ocfs2_inode_scan;
 typedef struct _ocfs2_dir_scan ocfs2_dir_scan;
 typedef struct _ocfs2_bitmap ocfs2_bitmap;
 typedef struct _ocfs2_devices ocfs2_devices;
+
+enum ocfs2_block_type {
+	OCFS2_BLOCK_UNKNOWN,
+	OCFS2_BLOCK_INODE,
+	OCFS2_BLOCK_SUPERBLOCK,
+	OCFS2_BLOCK_EXTENT_BLOCK,
+	OCFS2_BLOCK_GROUP_DESCRIPTOR,
+	OCFS2_BLOCK_DIR_BLOCK,
+	OCFS2_BLOCK_XATTR,
+	OCFS2_BLOCK_REFCOUNT,
+	OCFS2_BLOCK_DXROOT,
+	OCFS2_BLOCK_DXLEAF,
+};
+
+#define MAXQUOTAS 2
+#define USRQUOTA 0
+#define GRPQUOTA 1
+
+#define OCFS2_DEF_BLOCK_GRACE 604800 /* 1 week */
+#define OCFS2_DEF_INODE_GRACE 604800 /* 1 week */
+#define OCFS2_DEF_QUOTA_SYNC 10000   /* 10 seconds */
+
+struct _ocfs2_quota_info {
+	ocfs2_cached_inode *qi_inode;
+	int flags;
+	struct ocfs2_global_disk_dqinfo qi_info;
+};
+
+typedef struct _ocfs2_quota_info ocfs2_quota_info;
 
 struct _ocfs2_filesys {
 	char *fs_devname;
@@ -162,6 +203,8 @@ struct _ocfs2_filesys {
 	struct o2dlm_ctxt *fs_dlm_ctxt;
 	struct ocfs2_image_state *ost;
 
+	ocfs2_quota_info qinfo[MAXQUOTAS];
+
 	/* Reserved for the use of the calling application. */
 	void *fs_private;
 };
@@ -171,6 +214,15 @@ struct _ocfs2_cached_inode {
 	uint64_t ci_blkno;
 	struct ocfs2_dinode *ci_inode;
 	ocfs2_bitmap *ci_chains;
+};
+
+typedef unsigned int qid_t;
+
+struct _ocfs2_cached_dquot {
+	loff_t d_off;	/* Offset of structure in the file */
+	struct _ocfs2_cached_dquot *d_next;	/* Next entry in hashchain */
+	struct _ocfs2_cached_dquot **d_pprev;	/* Previous pointer in hashchain */
+	struct ocfs2_global_disk_dqblk d_ddquot;	/* Quota entry */
 };
 
 struct ocfs2_slot_data {
@@ -191,7 +243,9 @@ struct _ocfs2_devices {
 	int mount_flags;
 	int fs_type;			/* 0=unknown, 1=ocfs, 2=ocfs2 */
 	int hb_dev;
-	char stack[8];			/* Local, O2CB, CMAN, PCMK */
+	char stack[OCFS2_STACK_LABEL_LEN + 1]; /* Local, O2CB, CMAN, PCMK */
+	char cluster[OCFS2_CLUSTER_NAME_LEN + 1];
+	unsigned char stackflags;
 	uint32_t maj_num;		/* major number of the device */
 	uint32_t min_num;		/* minor number of the device */
 	errcode_t errcode;		/* error encountered reading device */
@@ -207,6 +261,37 @@ struct _ocfs2_fs_options {
 	uint32_t opt_ro_compat;
 };
 
+enum ocfs2_mkfs_types {
+	OCFS2_MKFSTYPE_DEFAULT,
+	OCFS2_MKFSTYPE_DATAFILES,
+	OCFS2_MKFSTYPE_MAIL,
+	OCFS2_MKFSTYPE_VMSTORE,
+};
+
+struct _ocfs2_quota_hash {
+	int alloc_entries;
+	int used_entries;
+	ocfs2_cached_dquot **hash;
+};
+
+struct ocfs2_dx_hinfo {
+	uint32_t major_hash;
+	uint32_t minor_hash;
+};
+
+struct ocfs2_dir_lookup_result {
+	struct ocfs2_dx_hinfo       dl_hinfo;         /* name hash results */
+	char *                      dl_leaf;          /* unindexed block buffer */
+	uint64_t                    dl_leaf_blkno;    /* blk number of dl_leaf */
+	struct ocfs2_dir_entry *    dl_entry;         /* dirent pointed into dl_leaf */
+	struct ocfs2_dx_leaf *      dl_dx_leaf;       /* indexed block buffer */
+	uint64_t                    dl_dx_leaf_blkno; /* blk number of dl_dx_leaf */
+	struct ocfs2_dx_entry *     dl_dx_entry;      /* indexed entry pointed to dl_dx_leaf */
+	int                         dl_dx_entry_idx;  /* index of dl_dx_entry in entries list */
+};
+
+typedef struct _ocfs2_quota_hash ocfs2_quota_hash;
+
 errcode_t ocfs2_malloc(unsigned long size, void *ptr);
 errcode_t ocfs2_malloc0(unsigned long size, void *ptr);
 errcode_t ocfs2_free(void *ptr);
@@ -217,12 +302,24 @@ errcode_t ocfs2_malloc_blocks(io_channel *channel, int num_blocks,
 			      void *ptr);
 errcode_t ocfs2_malloc_block(io_channel *channel, void *ptr);
 
+int io_is_device_readonly(io_channel *channel);
 errcode_t io_open(const char *name, int flags, io_channel **channel);
 errcode_t io_close(io_channel *channel);
 int io_get_error(io_channel *channel);
 errcode_t io_set_blksize(io_channel *channel, int blksize);
 int io_get_blksize(io_channel *channel);
 int io_get_fd(io_channel *channel);
+
+struct ocfs2_io_stats {
+	uint64_t is_bytes_read;
+	uint64_t is_bytes_written;
+	uint32_t is_cache_hits;
+	uint32_t is_cache_misses;
+	uint32_t is_cache_inserts;
+	uint32_t is_cache_removes;
+};
+
+void io_get_stats(io_channel *channel, struct ocfs2_io_stats *stats);
 
 /*
  * Raw I/O functions.  They will use the I/O cache if available.  The
@@ -249,8 +346,20 @@ errcode_t io_write_block_nocache(io_channel *channel, int64_t blkno, int count,
 errcode_t io_init_cache(io_channel *channel, size_t nr_blocks);
 void io_set_nocache(io_channel *channel, bool nocache);
 errcode_t io_init_cache_size(io_channel *channel, size_t bytes);
+size_t io_get_cache_size(io_channel *channel);
+errcode_t io_share_cache(io_channel *from, io_channel *to);
 errcode_t io_mlock_cache(io_channel *channel);
 void io_destroy_cache(io_channel *channel);
+
+
+struct io_vec_unit {
+	uint64_t	ivu_blkno;
+	char		*ivu_buf;
+	uint32_t	ivu_buflen;
+};
+
+errcode_t io_vec_read_blocks(io_channel *channel, struct io_vec_unit *ivus,
+			     int count);
 
 errcode_t ocfs2_read_super(ocfs2_filesys *fs, uint64_t superblock, char *sb);
 /* Writes the main superblock at OCFS2_SUPER_BLOCK_BLKNO */
@@ -267,6 +376,7 @@ errcode_t ocfs2_read_blocks(ocfs2_filesys *fs, int64_t blkno, int count,
 			    char *data);
 errcode_t ocfs2_read_blocks_nocache(ocfs2_filesys *fs, int64_t blkno, int count,
 				    char *data);
+int ocfs2_is_hard_readonly(ocfs2_filesys *fs);
 int ocfs2_mount_local(ocfs2_filesys *fs);
 errcode_t ocfs2_open(const char *name, int flags,
 		     unsigned int superblock, unsigned int blksize,
@@ -282,13 +392,16 @@ errcode_t ocfs2_read_inode(ocfs2_filesys *fs, uint64_t blkno,
 errcode_t ocfs2_write_inode(ocfs2_filesys *fs, uint64_t blkno,
 			    char *inode_buf);
 errcode_t ocfs2_check_directory(ocfs2_filesys *fs, uint64_t dir);
-
+int ocfs2_check_dir_entry(ocfs2_filesys *fs, struct ocfs2_dir_entry *de,
+				char *dir_buf, unsigned int offset);
 errcode_t ocfs2_read_cached_inode(ocfs2_filesys *fs, uint64_t blkno,
 				  ocfs2_cached_inode **ret_ci);
 errcode_t ocfs2_write_cached_inode(ocfs2_filesys *fs,
 				   ocfs2_cached_inode *cinode);
 errcode_t ocfs2_free_cached_inode(ocfs2_filesys *fs,
 				  ocfs2_cached_inode *cinode);
+errcode_t ocfs2_refresh_cached_inode(ocfs2_filesys *fs,
+				     ocfs2_cached_inode *cinode);
 
 /*
  * obj is the object containing the extent list.  eg, if you are swapping
@@ -311,6 +424,14 @@ errcode_t ocfs2_get_clusters(ocfs2_cached_inode *cinode,
 			     uint32_t *p_cluster,
 			     uint32_t *num_clusters,
 			     uint16_t *extent_flags);
+errcode_t ocfs2_xattr_get_clusters(ocfs2_filesys *fs,
+				   struct ocfs2_extent_list *el,
+				   uint64_t el_blkno,
+				   char *el_blk,
+				   uint32_t v_cluster,
+				   uint32_t *p_cluster,
+				   uint32_t *num_clusters,
+				   uint16_t *extent_flags);
 int ocfs2_find_leaf(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 		    uint32_t cpos, char **leaf_buf);
 int ocfs2_search_extent_list(struct ocfs2_extent_list *el, uint32_t v_cluster);
@@ -341,6 +462,62 @@ errcode_t ocfs2_read_extent_block_nocheck(ocfs2_filesys *fs, uint64_t blkno,
 					  char *eb_buf);
 errcode_t ocfs2_write_extent_block(ocfs2_filesys *fs, uint64_t blkno,
        				   char *eb_buf);
+void ocfs2_swap_refcount_list_to_cpu(ocfs2_filesys *fs, void *obj,
+				     struct ocfs2_refcount_list *rl);
+void ocfs2_swap_refcount_list_from_cpu(ocfs2_filesys *fs, void *obj,
+				       struct ocfs2_refcount_list *rl);
+void ocfs2_swap_refcount_block_to_cpu(ocfs2_filesys *fs,
+				      struct ocfs2_refcount_block *rb);
+void ocfs2_swap_refcount_block_from_cpu(ocfs2_filesys *fs,
+					struct ocfs2_refcount_block *rb);
+errcode_t ocfs2_read_refcount_block(ocfs2_filesys *fs, uint64_t blkno,
+				    char *eb_buf);
+errcode_t ocfs2_read_refcount_block_nocheck(ocfs2_filesys *fs, uint64_t blkno,
+					    char *eb_buf);
+errcode_t ocfs2_write_refcount_block(ocfs2_filesys *fs, uint64_t blkno,
+				     char *rb_buf);
+errcode_t ocfs2_delete_refcount_block(ocfs2_filesys *fs, uint64_t blkno);
+errcode_t ocfs2_new_refcount_block(ocfs2_filesys *fs, uint64_t *blkno,
+				   uint64_t root_blkno, uint32_t rf_generation);
+errcode_t ocfs2_increase_refcount(ocfs2_filesys *fs, uint64_t ino,
+				  uint64_t cpos, uint32_t len);
+errcode_t ocfs2_decrease_refcount(ocfs2_filesys *fs,
+				  uint64_t ino, uint32_t cpos,
+				  uint32_t len, int delete);
+errcode_t ocfs2_refcount_cow(ocfs2_cached_inode *cinode,
+			     uint32_t cpos, uint32_t write_len,
+			     uint32_t max_cpos);
+errcode_t ocfs2_refcount_cow_xattr(ocfs2_cached_inode *ci,
+				   char *xe_buf,
+				   uint64_t xe_blkno,
+				   char *value_buf,
+				   uint64_t value_blkno,
+				   struct ocfs2_xattr_value_root *xv,
+				   uint32_t cpos, uint32_t write_len);
+errcode_t ocfs2_change_refcount_flag(ocfs2_filesys *fs, uint64_t i_blkno,
+				     uint32_t v_cpos, uint32_t clusters,
+				     uint64_t p_cpos,
+				     int new_flags, int clear_flags);
+errcode_t ocfs2_refcount_tree_get_rec(ocfs2_filesys *fs,
+				      struct ocfs2_refcount_block *rb,
+				      uint32_t phys_cpos,
+				      uint64_t *p_blkno,
+				      uint32_t *e_cpos,
+				      uint32_t *num_clusters);
+errcode_t ocfs2_refcount_punch_hole(ocfs2_filesys *fs, uint64_t rf_blkno,
+				    uint64_t p_start, uint32_t len);
+errcode_t ocfs2_change_refcount(ocfs2_filesys *fs, uint64_t rf_blkno,
+				uint64_t p_start, uint32_t len,
+				uint32_t refcount);
+int ocfs2_get_refcount_rec(ocfs2_filesys *fs,
+			   char *ref_root_buf,
+			   uint64_t cpos, unsigned int len,
+			   struct ocfs2_refcount_rec *ret_rec,
+			   int *index,
+			   char *ret_buf);
+errcode_t ocfs2_create_refcount_tree(ocfs2_filesys *fs, uint64_t *refcount_loc);
+errcode_t ocfs2_attach_refcount_tree(ocfs2_filesys *fs,
+				     uint64_t ino, uint64_t refcount_loc);
 errcode_t ocfs2_swap_dir_entries_from_cpu(void *buf, uint64_t bytes);
 errcode_t ocfs2_swap_dir_entries_to_cpu(void *buf, uint64_t bytes);
 void ocfs2_swap_dir_trailer(struct ocfs2_dir_block_trailer *trailer);
@@ -357,7 +534,18 @@ int ocfs2_skip_dir_trailer(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 			   struct ocfs2_dir_entry *de, unsigned long offset);
 void ocfs2_init_dir_trailer(ocfs2_filesys *fs, struct ocfs2_dinode *di,
 			    uint64_t blkno, void *buf);
-
+void ocfs2_swap_dx_root_to_cpu(ocfs2_filesys *fs,
+			       struct ocfs2_dx_root_block *dx_root);
+void ocfs2_swap_dx_leaf_to_cpu(struct ocfs2_dx_leaf *dx_leaf);
+void ocfs2_swap_dx_root_from_cpu(ocfs2_filesys *fs,
+		struct ocfs2_dx_root_block *dx_root);
+errcode_t ocfs2_read_dx_root(ocfs2_filesys *fs, uint64_t block,
+			     void *buf);
+void ocfs2_swap_dx_leaf_from_cpu(struct ocfs2_dx_leaf *dx_leaf);
+errcode_t ocfs2_read_dx_leaf(ocfs2_filesys *fs, uint64_t block,
+			     void *buf);
+int ocfs2_dir_indexed(struct ocfs2_dinode *di);
+errcode_t ocfs2_dx_dir_truncate(ocfs2_filesys *fs, uint64_t dir);
 errcode_t ocfs2_dir_iterate2(ocfs2_filesys *fs,
 			     uint64_t dir,
 			     int flags,
@@ -365,6 +553,7 @@ errcode_t ocfs2_dir_iterate2(ocfs2_filesys *fs,
 			     int (*func)(uint64_t	dir,
 					 int		entry,
 					 struct ocfs2_dir_entry *dirent,
+					 uint64_t blocknr,
 					 int	offset,
 					 int	blocksize,
 					 char	*buf,
@@ -375,11 +564,33 @@ extern errcode_t ocfs2_dir_iterate(ocfs2_filesys *fs,
 				   int flags,
 				   char *block_buf,
 				   int (*func)(struct ocfs2_dir_entry *dirent,
+					       uint64_t blocknr,
 					       int	offset,
 					       int	blocksize,
 					       char	*buf,
 					       void	*priv_data),
 				   void *priv_data);
+
+extern errcode_t ocfs2_dx_entries_iterate(ocfs2_filesys *fs,
+			struct ocfs2_dinode *dir,
+			int flags,
+			int (*func)(ocfs2_filesys *fs,
+				    struct ocfs2_dx_entry_list *entry_list,
+				    struct ocfs2_dx_root_block *dx_root,
+				    struct ocfs2_dx_leaf *dx_leaf,
+				    void *priv_data),
+			void *priv_data);
+
+extern errcode_t ocfs2_dx_frees_iterate(ocfs2_filesys *fs,
+			struct ocfs2_dinode *dir,
+			struct ocfs2_dx_root_block *dx_root,
+			int flags,
+			int (*func)(ocfs2_filesys *fs,
+				    uint64_t blkno,
+				    struct ocfs2_dir_block_trailer *trailer,
+				    char *dirblock,
+				    void *priv_data),
+			void *priv_data);
 
 errcode_t ocfs2_lookup(ocfs2_filesys *fs, uint64_t dir,
 		       const char *name, int namelen, char *buf,
@@ -399,6 +610,7 @@ errcode_t ocfs2_open_inode_scan(ocfs2_filesys *fs,
 void ocfs2_close_inode_scan(ocfs2_inode_scan *scan);
 errcode_t ocfs2_get_next_inode(ocfs2_inode_scan *scan,
 			       uint64_t *blkno, char *inode);
+uint64_t ocfs2_get_max_inode_count(ocfs2_inode_scan *scan);
 
 errcode_t ocfs2_open_dir_scan(ocfs2_filesys *fs, uint64_t dir, int flags,
 			      ocfs2_dir_scan **ret_scan);
@@ -453,13 +665,21 @@ errcode_t ocfs2_check_heartbeats(struct list_head *dev_list, int ignore_local);
 errcode_t ocfs2_get_ocfs1_label(char *device, uint8_t *label, uint16_t label_len,
 				uint8_t *uuid, uint16_t uuid_len);
 
-void ocfs2_swap_group_desc(struct ocfs2_group_desc *gd);
+void ocfs2_swap_group_desc_from_cpu(ocfs2_filesys *fs,
+				    struct ocfs2_group_desc *gd);
+void ocfs2_swap_group_desc_to_cpu(ocfs2_filesys *fs,
+				  struct ocfs2_group_desc *gd);
 errcode_t ocfs2_read_group_desc(ocfs2_filesys *fs, uint64_t blkno,
 				char *gd_buf);
 
 errcode_t ocfs2_write_group_desc(ocfs2_filesys *fs, uint64_t blkno,
 				 char *gd_buf);
+uint64_t ocfs2_get_block_from_group(ocfs2_filesys *fs,
+				    struct ocfs2_group_desc *grp,
+				    int bpc, int bit_offset);
 
+errcode_t ocfs2_cache_chain_allocator_blocks(ocfs2_filesys *fs,
+					     struct ocfs2_dinode *di);
 errcode_t ocfs2_chain_iterate(ocfs2_filesys *fs,
 			      uint64_t blkno,
 			      int (*func)(ocfs2_filesys *fs,
@@ -475,6 +695,7 @@ errcode_t ocfs2_write_chain_allocator(ocfs2_filesys *fs,
 errcode_t ocfs2_chain_alloc(ocfs2_filesys *fs,
 			    ocfs2_cached_inode *cinode,
 			    uint64_t *gd_blkno,
+			    uint16_t *suballoc_bit,
 			    uint64_t *bitno);
 errcode_t ocfs2_chain_free(ocfs2_filesys *fs,
 			   ocfs2_cached_inode *cinode,
@@ -514,14 +735,14 @@ void ocfs2_init_group_desc(ocfs2_filesys *fs,
 			   struct ocfs2_group_desc *gd,
 			   uint64_t blkno, uint32_t generation,
 			   uint64_t parent_inode, uint16_t bits,
-			   uint16_t chain);
+			   uint16_t chain, int suballoc);
 
 errcode_t ocfs2_new_dir_block(ocfs2_filesys *fs, uint64_t dir_ino,
 			      uint64_t parent_ino, char **block);
 
-errcode_t ocfs2_insert_extent(ocfs2_filesys *fs, uint64_t ino, uint32_t cpos,
-			      uint64_t c_blkno, uint32_t clusters,
-			      uint16_t flag);
+errcode_t ocfs2_inode_insert_extent(ocfs2_filesys *fs, uint64_t ino,
+				    uint32_t cpos, uint64_t c_blkno,
+				    uint32_t clusters, uint16_t flag);
 errcode_t ocfs2_cached_inode_insert_extent(ocfs2_cached_inode *ci,
 					   uint32_t cpos, uint64_t c_blkno,
 					   uint32_t clusters, uint16_t flag);
@@ -533,13 +754,19 @@ errcode_t ocfs2_new_inode(ocfs2_filesys *fs, uint64_t *ino, int mode);
 errcode_t ocfs2_new_system_inode(ocfs2_filesys *fs, uint64_t *ino, int mode, int flags);
 errcode_t ocfs2_delete_inode(ocfs2_filesys *fs, uint64_t ino);
 errcode_t ocfs2_new_extent_block(ocfs2_filesys *fs, uint64_t *blkno);
+errcode_t ocfs2_new_dx_root(ocfs2_filesys *fs, struct ocfs2_dinode *di, uint64_t *dr_blkno);
 errcode_t ocfs2_delete_extent_block(ocfs2_filesys *fs, uint64_t blkno);
+errcode_t ocfs2_delete_dx_root(ocfs2_filesys *fs, uint64_t dr_blkno);
+
 /*
  * Allocate the blocks and insert them to the file.
  * only i_clusters of dinode will be updated accordingly, i_size not changed.
  */
 errcode_t ocfs2_extend_allocation(ocfs2_filesys *fs, uint64_t ino,
 				  uint32_t new_clusters);
+/* Ditto for cached inode */
+errcode_t ocfs2_cached_inode_extend_allocation(ocfs2_cached_inode *ci,
+					       uint32_t new_clusters);
 /* Extend the file to the new size. No clusters will be allocated. */
 errcode_t ocfs2_extend_file(ocfs2_filesys *fs, uint64_t ino, uint64_t new_size);
 
@@ -550,6 +777,8 @@ errcode_t ocfs2_allocate_unwritten_extents(ocfs2_filesys *fs, uint64_t ino,
 					   uint64_t offset, uint64_t len);
 
 errcode_t ocfs2_truncate(ocfs2_filesys *fs, uint64_t ino, uint64_t new_i_size);
+errcode_t ocfs2_truncate_inline(ocfs2_filesys *fs, uint64_t ino,
+				uint64_t new_i_size);
 errcode_t ocfs2_truncate_full(ocfs2_filesys *fs, uint64_t ino,
 			      uint64_t new_i_size,
 			      errcode_t (*free_clusters)(ocfs2_filesys *fs,
@@ -623,6 +852,69 @@ errcode_t ocfs2_meta_lock(ocfs2_filesys *fs, ocfs2_cached_inode *inode,
 			  enum o2dlm_lock_level level, int flags);
 
 errcode_t ocfs2_meta_unlock(ocfs2_filesys *fs, ocfs2_cached_inode *ci);
+
+/* Quota operations */
+static inline int ocfs2_global_dqstr_in_blk(int blocksize)
+{
+	return (blocksize - OCFS2_QBLK_RESERVED_SPACE -
+		sizeof(struct qt_disk_dqdbheader)) /
+		sizeof(struct ocfs2_global_disk_dqblk);
+}
+void ocfs2_swap_quota_header(struct ocfs2_disk_dqheader *header);
+void ocfs2_swap_quota_local_info(struct ocfs2_local_disk_dqinfo *info);
+void ocfs2_swap_quota_chunk_header(struct ocfs2_local_disk_chunk *chunk);
+void ocfs2_swap_quota_global_info(struct ocfs2_global_disk_dqinfo *info);
+void ocfs2_swap_quota_global_dqblk(struct ocfs2_global_disk_dqblk *dqblk);
+void ocfs2_swap_quota_leaf_block_header(struct qt_disk_dqdbheader *bheader);
+errcode_t ocfs2_init_local_quota_file(ocfs2_filesys *fs, int type,
+				      uint64_t blkno);
+errcode_t ocfs2_init_local_quota_files(ocfs2_filesys *fs, int type);
+int ocfs2_qtree_depth(int blocksize);
+int ocfs2_qtree_entry_unused(struct ocfs2_global_disk_dqblk *ddquot);
+errcode_t ocfs2_init_global_quota_file(ocfs2_filesys *fs, int type);
+errcode_t ocfs2_init_fs_quota_info(ocfs2_filesys *fs, int type);
+errcode_t ocfs2_read_global_quota_info(ocfs2_filesys *fs, int type);
+errcode_t ocfs2_load_fs_quota_info(ocfs2_filesys *fs);
+errcode_t ocfs2_write_global_quota_info(ocfs2_filesys *fs, int type);
+errcode_t ocfs2_write_dquot(ocfs2_filesys *fs, int type,
+			    ocfs2_cached_dquot *dquot);
+errcode_t ocfs2_delete_dquot(ocfs2_filesys *fs, int type,
+			     ocfs2_cached_dquot *dquot);
+errcode_t ocfs2_read_dquot(ocfs2_filesys *fs, int type, qid_t id,
+			   ocfs2_cached_dquot **ret_dquot);
+errcode_t ocfs2_new_quota_hash(ocfs2_quota_hash **hashp);
+errcode_t ocfs2_free_quota_hash(ocfs2_quota_hash *hash);
+errcode_t ocfs2_insert_quota_hash(ocfs2_quota_hash *hash,
+				  ocfs2_cached_dquot *dquot);
+errcode_t ocfs2_remove_quota_hash(ocfs2_quota_hash *hash,
+				  ocfs2_cached_dquot *dquot);
+errcode_t ocfs2_find_quota_hash(ocfs2_quota_hash *hash, qid_t id,
+				ocfs2_cached_dquot **dquotp);
+errcode_t ocfs2_find_create_quota_hash(ocfs2_quota_hash *hash, qid_t id,
+				       ocfs2_cached_dquot **dquotp);
+errcode_t ocfs2_find_read_quota_hash(ocfs2_filesys *fs, ocfs2_quota_hash *hash,
+				     int type, qid_t id,
+				     ocfs2_cached_dquot **dquotp);
+errcode_t ocfs2_compute_quota_usage(ocfs2_filesys *fs,
+				    ocfs2_quota_hash *usr_hash,
+				    ocfs2_quota_hash *grp_hash);
+errcode_t ocfs2_init_quota_change(ocfs2_filesys *fs,
+				  ocfs2_quota_hash **usrhash,
+				  ocfs2_quota_hash **grphash);
+errcode_t ocfs2_finish_quota_change(ocfs2_filesys *fs,
+				    ocfs2_quota_hash *usrhash,
+				    ocfs2_quota_hash *grphash);
+errcode_t ocfs2_apply_quota_change(ocfs2_filesys *fs,
+				   ocfs2_quota_hash *usrhash,
+				   ocfs2_quota_hash *grphash,
+				   uid_t uid, gid_t gid,
+				   int64_t space_change,
+				   int64_t inode_change);
+errcode_t ocfs2_iterate_quota_hash(ocfs2_quota_hash *hash,
+				   errcode_t (*f)(ocfs2_cached_dquot *, void *),
+				   void *data);
+errcode_t ocfs2_write_release_dquots(ocfs2_filesys *fs, int type,
+				     ocfs2_quota_hash *hash);
 
 /* Low level */
 void ocfs2_swap_slot_map(struct ocfs2_slot_map *sm, int num_slots);
@@ -720,6 +1012,10 @@ enum ocfs2_feature_levels {
 errcode_t ocfs2_snprint_feature_flags(char *str, size_t size,
 				      ocfs2_fs_options *flags);
 errcode_t ocfs2_snprint_tunefs_flags(char *str, size_t size, uint16_t flags);
+errcode_t ocfs2_snprint_extent_flags(char *str, size_t size, uint8_t flags);
+errcode_t ocfs2_snprint_refcount_flags(char *str, size_t size, uint8_t flags);
+errcode_t ocfs2_snprint_cluster_o2cb_flags(char *str, size_t size,
+					   uint8_t flags);
 errcode_t ocfs2_parse_feature(const char *opts,
 			      ocfs2_fs_options *feature_flags,
 			      ocfs2_fs_options *reverse_flags);
@@ -728,6 +1024,7 @@ errcode_t ocfs2_parse_feature_level(const char *typestr,
 				    enum ocfs2_feature_levels *level);
 
 errcode_t ocfs2_merge_feature_flags_with_level(ocfs2_fs_options *dest,
+					       enum ocfs2_mkfs_types fstype,
 					       int level,
 					       ocfs2_fs_options *feature_set,
 					       ocfs2_fs_options *reverse_set);
@@ -820,6 +1117,18 @@ static inline uint32_t ocfs2_bytes_to_clusters(ocfs2_filesys *fs,
 	return (uint32_t)ret;
 }
 
+static inline uint64_t ocfs2_block_to_cluster_start(ocfs2_filesys *fs,
+						    uint64_t blocks)
+{
+	int c_to_b_bits =
+		OCFS2_RAW_SB(fs->fs_super)->s_clustersize_bits -
+		OCFS2_RAW_SB(fs->fs_super)->s_blocksize_bits;
+	uint32_t clusters;
+
+	clusters = ocfs2_blocks_to_clusters(fs, blocks);
+	return (uint64_t)clusters << c_to_b_bits;
+}
+
 static inline uint64_t ocfs2_blocks_to_bytes(ocfs2_filesys *fs,
 					     uint64_t blocks)
 {
@@ -881,6 +1190,24 @@ static inline uint64_t ocfs2_blocks_in_bytes(ocfs2_filesys *fs,
 	return ret >> OCFS2_RAW_SB(fs->fs_super)->s_blocksize_bits;
 }
 
+static inline uint64_t ocfs2_align_bytes_to_clusters(ocfs2_filesys *fs,
+						     uint64_t bytes)
+{
+	uint32_t clusters;
+
+	clusters = ocfs2_clusters_in_bytes(fs, bytes);
+	return (uint64_t)clusters <<
+			OCFS2_RAW_SB(fs->fs_super)->s_clustersize_bits;
+}
+
+static inline uint64_t ocfs2_align_bytes_to_blocks(ocfs2_filesys *fs,
+						   uint64_t bytes)
+{
+	uint64_t blocks;
+
+	blocks = ocfs2_blocks_in_bytes(fs, bytes);
+	return blocks << OCFS2_RAW_SB(fs->fs_super)->s_blocksize_bits;
+}
 
 /* given a cluster offset, calculate which block group it belongs to
  * and return that block offset. */
@@ -911,7 +1238,7 @@ static inline void ocfs2_calc_cluster_groups(uint64_t clusters,
 					     uint64_t blocksize,
 				     struct ocfs2_cluster_group_sizes *cgs)
 {
-	uint16_t max_bits = 8 * ocfs2_group_bitmap_size(blocksize);
+	uint16_t max_bits = 8 * ocfs2_group_bitmap_size(blocksize, 0, 0);
 
 	cgs->cgs_cpg = max_bits;
 	if (max_bits > clusters)
@@ -970,11 +1297,40 @@ static inline int ocfs2_sparse_alloc(struct ocfs2_super_block *osb)
 	return 0;
 }
 
-static inline int ocfs2_userspace_stack(struct ocfs2_super_block *osb)
+static inline int ocfs2_clusterinfo_valid(struct ocfs2_super_block *osb)
 {
-	if (osb->s_feature_incompat & OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK)
+	if (osb->s_feature_incompat &
+	    (OCFS2_FEATURE_INCOMPAT_USERSPACE_STACK |
+	     OCFS2_FEATURE_INCOMPAT_CLUSTERINFO))
 		return 1;
 	return 0;
+}
+
+static inline int ocfs2_userspace_stack(struct ocfs2_super_block *osb)
+{
+	if (ocfs2_clusterinfo_valid(osb) &&
+	    memcmp(osb->s_cluster_info.ci_stack, OCFS2_CLASSIC_CLUSTER_STACK,
+		   OCFS2_STACK_LABEL_LEN))
+		return 1;
+	return 0;
+}
+
+static inline int ocfs2_o2cb_stack(struct ocfs2_super_block *osb)
+{
+	if (ocfs2_clusterinfo_valid(osb) &&
+	    !memcmp(osb->s_cluster_info.ci_stack, OCFS2_CLASSIC_CLUSTER_STACK,
+		    OCFS2_STACK_LABEL_LEN))
+		return 1;
+	return 0;
+}
+
+static inline int ocfs2_cluster_o2cb_global_heartbeat(struct ocfs2_super_block *osb)
+{
+	if (!ocfs2_o2cb_stack(osb))
+		return 0;
+
+	return osb->s_cluster_info.ci_stackflags &
+		OCFS2_CLUSTER_O2CB_GLOBAL_HEARTBEAT;
 }
 
 static inline int ocfs2_writes_unwritten_extents(struct ocfs2_super_block *osb)
@@ -1019,6 +1375,13 @@ static inline int ocfs2_support_xattr(struct ocfs2_super_block *osb)
 	return 0;
 }
 
+static inline int ocfs2_supports_indexed_dirs(struct ocfs2_super_block *osb)
+{
+	if (osb->s_feature_incompat & OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS)
+		return 1;
+	return 0;
+}
+
 /*
  * When we're swapping some of our disk structures, a garbage count
  * can send us past the edge of a block buffer.  This function guards
@@ -1039,6 +1402,22 @@ static inline int ocfs2_swap_barrier(ocfs2_filesys *fs, void *block_buffer,
 	return end > limit;
 }
 
+
+static inline int ocfs2_refcount_tree(struct ocfs2_super_block *osb)
+{
+	if (OCFS2_HAS_INCOMPAT_FEATURE(osb,
+				       OCFS2_FEATURE_INCOMPAT_REFCOUNT_TREE))
+		return 1;
+	return 0;
+}
+
+static inline int ocfs2_supports_discontig_bg(struct ocfs2_super_block *osb)
+{
+	if (OCFS2_HAS_INCOMPAT_FEATURE(osb,
+					OCFS2_FEATURE_INCOMPAT_DISCONTIG_BG))
+		return 1;
+	return 0;
+}
 
 /*
  * shamelessly lifted from the kernel
@@ -1101,6 +1480,10 @@ static inline int ocfs2_swap_barrier(ocfs2_filesys *fs, void *block_buffer,
 #define OCFS2_BLOCK_ABORT	0x02
 #define OCFS2_BLOCK_ERROR	0x04
 
+
+#define OCFS2_IS_VALID_DX_ROOT(ptr)					\
+		(!strcmp((char *)(ptr)->dr_signature, OCFS2_DX_ROOT_SIGNATURE))
+
 /*
  * Block iterate flags
  *
@@ -1139,6 +1522,19 @@ errcode_t ocfs2_extent_iterate_inode(ocfs2_filesys *fs,
 					         int ref_recno,
 					         void *priv_data),
 					         void *priv_data);
+errcode_t ocfs2_extent_iterate_dx_root(ocfs2_filesys *fs,
+				       struct ocfs2_dx_root_block *dx_root,
+				       int flags,
+				       char *block_buf,
+				       int (*func)(ocfs2_filesys *fs,
+						   struct ocfs2_extent_rec *rec,
+						   int tree_depth,
+						   uint32_t ccount,
+						   uint64_t ref_blkno,
+						   int ref_recno,
+						   void *priv_data),
+				       void *priv_data);
+
 errcode_t ocfs2_block_iterate(ocfs2_filesys *fs,
 			      uint64_t blkno,
 			      int flags,
@@ -1158,11 +1554,26 @@ errcode_t ocfs2_block_iterate_inode(ocfs2_filesys *fs,
 						void *priv_data),
 				    void *priv_data);
 
+#define OCFS2_XATTR_ABORT	0x01
+#define OCFS2_XATTR_ERROR	0x02
+errcode_t ocfs2_xattr_iterate(ocfs2_cached_inode *ci,
+			      int (*func)(ocfs2_cached_inode *ci,
+					  char *xe_buf,
+					  uint64_t xe_blkno,
+					  struct ocfs2_xattr_entry *xe,
+					  char *value_buf,
+					  uint64_t value_blkno,
+					  void *value,
+					  int in_bucket,
+					  void *priv_data),
+			      void *priv_data);
+
 uint32_t ocfs2_xattr_uuid_hash(unsigned char *uuid);
 uint32_t ocfs2_xattr_name_hash(uint32_t uuid_hash, const char *name,
 			       int name_len);
-int ocfs2_xattr_find_leaf(ocfs2_filesys *fs, struct ocfs2_xattr_block *xb,
-			  uint32_t cpos, char **leaf_buf);
+int ocfs2_tree_find_leaf(ocfs2_filesys *fs, struct ocfs2_extent_list *el,
+			 uint64_t el_blkno, char *el_blk,
+			 uint32_t cpos, char **leaf_buf);
 uint16_t ocfs2_xattr_buckets_per_cluster(ocfs2_filesys *fs);
 uint16_t ocfs2_blocks_per_xattr_bucket(ocfs2_filesys *fs);
 /* See ocfs2_swap_extent_list() for a discussion of obj */
@@ -1195,7 +1606,7 @@ errcode_t ocfs2_read_xattr_bucket(ocfs2_filesys *fs,
 errcode_t ocfs2_write_xattr_bucket(ocfs2_filesys *fs,
 				   uint64_t blkno,
 				   char *bucket_buf);
-errcode_t ocfs2_xattr_value_truncate(ocfs2_filesys *fs,
+errcode_t ocfs2_xattr_value_truncate(ocfs2_filesys *fs, uint64_t ino,
 				     struct ocfs2_xattr_value_root *xv);
 errcode_t ocfs2_xattr_tree_truncate(ocfs2_filesys *fs,
 				    struct ocfs2_xattr_tree_root *xt);
@@ -1213,5 +1624,39 @@ errcode_t ocfs2_extent_iterate_xattr(ocfs2_filesys *fs,
 				     void *priv_data,
 				     int *changed);
 errcode_t ocfs2_delete_xattr_block(ocfs2_filesys *fs, uint64_t blkno);
+errcode_t ocfs2_dir_indexed_tree_truncate(ocfs2_filesys *fs,
+					struct ocfs2_dx_root_block *dx_root);
+errcode_t ocfs2_write_dx_root(ocfs2_filesys *fs, uint64_t block, char *buf);
+errcode_t ocfs2_write_dx_leaf(ocfs2_filesys *fs, uint64_t block, void *buf);
+errcode_t ocfs2_dx_dir_build(ocfs2_filesys *fs, uint64_t dir);
+errcode_t ocfs2_dx_dir_insert_entry(ocfs2_filesys *fs, uint64_t dir, const char *name,
+					uint64_t ino, uint64_t blkno);
+int ocfs2_search_dirblock(ocfs2_filesys *fs, char *dir_buf,
+			const char *name, int namelen, unsigned int bytes,
+			struct ocfs2_dir_entry **res_dir);
+void ocfs2_dx_dir_name_hash(ocfs2_filesys *fs, const char *name,
+			int len, struct ocfs2_dx_hinfo *hinfo);
+errcode_t ocfs2_dx_dir_lookup(ocfs2_filesys *fs, struct ocfs2_dx_root_block *dx_root,
+			struct ocfs2_extent_list *el, struct ocfs2_dx_hinfo *hinfo,
+			uint32_t *ret_cpos, uint64_t *ret_phys_blkno);
+errcode_t ocfs2_dx_dir_search(ocfs2_filesys *fs, const char *name,
+			int namelen, struct ocfs2_dx_root_block *dx_root,
+			struct ocfs2_dir_lookup_result *res);
+void release_lookup_res(struct ocfs2_dir_lookup_result *res);
+int ocfs2_find_max_rec_len(ocfs2_filesys *fs, char *buf);
+void ocfs2_dx_list_remove_entry(struct ocfs2_dx_entry_list *entry_list, int index);
+int ocfs2_is_dir_trailer(ocfs2_filesys *fs, struct ocfs2_dinode *di, unsigned long de_off);
+/* routines for block check */
+uint32_t ocfs2_hamming_encode(uint32_t parity, void *data,
+				unsigned int d, unsigned int nr);
+uint32_t ocfs2_hamming_encode_block(void *data, unsigned int d);
+void ocfs2_hamming_fix(void *data, unsigned int d,
+			unsigned int nr, unsigned int fix);
+void ocfs2_hamming_fix_block(void *data, unsigned int d, unsigned int fix);
+uint32_t crc32_le(uint32_t crc, unsigned char const *p, size_t len);
+
+enum ocfs2_block_type ocfs2_detect_block(char *buf);
+void ocfs2_swap_block_from_cpu(ocfs2_filesys *fs, void *block);
+void ocfs2_swap_block_to_cpu(ocfs2_filesys *fs, void *block);
 
 #endif  /* _FILESYS_H */

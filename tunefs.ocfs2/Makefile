@@ -13,18 +13,29 @@ LIBO2DLM_DEPS = $(TOPDIR)/libo2dlm/libo2dlm.a
 
 LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb
 LIBO2CB_DEPS = $(TOPDIR)/libo2cb/libo2cb.a
+ifneq ($(BUILD_FSDLM_SUPPORT),)
+LIBO2CB_LIBS += -ldlm_lt
+endif
+ifneq ($(BUILD_CMAP_SUPPORT),)
+LIBO2CB_LIBS += -lcmap
+endif
 
 UNINST_LIBRARIES = libocfs2ne.a
 
 OCFS2NE_FEATURES =			\
 	feature_backup_super		\
+	feature_discontig_bg		\
 	feature_extended_slotmap	\
 	feature_inline_data		\
 	feature_local			\
 	feature_metaecc			\
+	feature_refcount		\
 	feature_sparse_files		\
 	feature_unwritten_extents	\
-	feature_xattr
+	feature_xattr			\
+	feature_indexed_dirs		\
+	feature_quota			\
+	feature_clusterinfo
 
 OCFS2NE_OPERATIONS =			\
 	op_cloned_volume		\
@@ -35,16 +46,18 @@ OCFS2NE_OPERATIONS =			\
 	op_resize_volume		\
 	op_set_label			\
 	op_set_journal_size		\
+	op_set_journal_block		\
 	op_set_slot_count		\
-	op_update_cluster_stack
+	op_update_cluster_stack		\
+	op_set_quota_sync_interval	\
 
 sbindir = $(root_sbindir)
-SBIN_PROGRAMS = tunefs.ocfs2
+SBIN_PROGRAMS = tunefs.ocfs2 o2cluster
 
 INCLUDES = -I$(TOPDIR)/include -I.
 DEFINES = -DVERSION=\"$(VERSION)\"
 
-MANS = tunefs.ocfs2.8
+MANS = tunefs.ocfs2.8 o2cluster.8
 
 ifneq ($(OCFS2_DEBUG_EXE),)
 DEBUG_EXE_FILES = $(shell awk '/DEBUG_EXE/{if (k[FILENAME] == 0) {print FILENAME; k[FILENAME] = 1;}}' $(CFILES))
@@ -61,14 +74,15 @@ debug_%.o : %.c
 
 debug_op_features: debug_op_features.o $(OCFS2NE_FEATURE_OBJS) libocfs2ne.a $(LIBOCFS2_DEPS) $(LIBO2DLM_DEPS) $(LIBO2CB_DEPS) $(LIBTOOLS_INTERNAL_DEPS)
 	$(LINK) $(LIBOCFS2_LIBS) $(UUID_LIBS) $(LIBO2DLM_LIBS) \
-		$(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS)
+		$(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS) $(AIO_LIBS)
 
 debug_%: debug_%.o libocfs2ne.a $(LIBOCFS2_DEPS) $(LIBO2DLM_DEPS) $(LIBO2CB_DEPS) $(LIBTOOLS_INTERNAL_DEPS)
 	$(LINK) $(LIBOCFS2_LIBS) $(UUID_LIBS) $(LIBO2DLM_LIBS) \
-		$(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS)
+		$(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS) $(AIO_LIBS)
 endif
 
 LIBOCFS2NE_CFILES = libocfs2ne.c
+O2CLUSTER_CFILES = o2cluster.c
 HFILES_GEN = o2ne_err.h
 
 o2ne_err.c o2ne_err.h: o2ne_err.et
@@ -81,16 +95,17 @@ OCFS2NE_CFILES =			\
 	$(OCFS2NE_OPERATION_CFILES)	\
 	$(OCFS2NE_FEATURE_CFILES)
 
-CFILES = $(LIBOCFS2NE_CFILES) $(OCFS2NE_CFILES)
+CFILES = $(LIBOCFS2NE_CFILES) $(OCFS2NE_CFILES) $(O2CLUSTER_CFILES)
 HFILES = libocfs2ne.h
 
 LIBOCFS2NE_OBJS = $(subst .c,.o,$(LIBOCFS2NE_CFILES)) o2ne_err.o
 OCFS2NE_OBJS = $(subst .c,.o,$(OCFS2NE_CFILES))
+O2CLUSTER_OBJS = $(subst .c,.o,$(O2CLUSTER_CFILES))
 
 $(LIBOCFS2NE_OBJS): $(HFILES_GEN)
 $(OCFS2NE_OBJS): $(HFILES_GEN)
 
-DIST_FILES = $(CFILES) $(HFILES) tunefs.ocfs2.8.in o2ne_err.et
+DIST_FILES = $(CFILES) $(HFILES) tunefs.ocfs2.8.in o2cluster.8.in o2ne_err.et
 
 libocfs2ne.a: $(LIBOCFS2NE_OBJS)
 	rm -f $@
@@ -99,7 +114,10 @@ libocfs2ne.a: $(LIBOCFS2NE_OBJS)
 
 ocfs2ne: $(OCFS2NE_OBJS) libocfs2ne.a $(LIBOCFS2_DEPS) $(LIBO2DLM_DEPS) $(LIBO2CB_DEPS) $(LIBTOOLS_INTERNAL_DEPS)
 	$(LINK) $(LIBOCFS2_LIBS) $(UUID_LIBS) $(LIBO2DLM_LIBS) \
-		$(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS)
+		$(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(COM_ERR_LIBS) $(AIO_LIBS)
+
+o2cluster: ${O2CLUSTER_OBJS} $(LIBOCFS2_DEPS) $(LIBO2CB_DEPS) $(LIBTOOLS_INTERNAL_DEPS) $(LIBO2DLM_DEPS)
+	$(LINK) $(LIBOCFS2_LIBS) $(LIBO2CB_LIBS) $(LIBTOOLS_INTERNAL_LIBS) $(LIBO2DLM_LIBS) $(COM_ERR_LIBS) $(AIO_LIBS)
 
 tunefs.ocfs2: ocfs2ne
 	ln -f ocfs2ne tunefs.ocfs2

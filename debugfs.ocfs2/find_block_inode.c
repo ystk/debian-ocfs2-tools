@@ -25,7 +25,7 @@
 
 #include "main.h"
 
-extern dbgfs_gbls gbls;
+extern struct dbgfs_gbls gbls;
 
 struct block_array {
 	uint64_t blkno;
@@ -203,7 +203,7 @@ static errcode_t lookup_global_bitmap(ocfs2_filesys *fs, uint64_t *blkno)
 	char sysfile[50];
 	errcode_t ret = 0;
 
-	snprintf(sysfile, sizeof(sysfile),
+	snprintf(sysfile, sizeof(sysfile), "%s",
 		 ocfs2_system_inodes[GLOBAL_BITMAP_SYSTEM_INODE].si_name);
 
 	ret = ocfs2_lookup(fs, fs->fs_sysdir_blkno, sysfile,
@@ -294,7 +294,8 @@ static void check_computed_blocks(ocfs2_filesys *fs, uint64_t gb_blkno,
 	if (*found >= count)
 		return;
 
-	cpg = ocfs2_group_bitmap_size(1 << fs->fs_blocksize) * 8;
+	cpg = ocfs2_group_bitmap_size(fs->fs_blocksize, 0,
+			OCFS2_RAW_SB(fs->fs_super)->s_feature_incompat) * 8;
 	bpg = ocfs2_clusters_to_blocks(fs, cpg);
 
 	for (i = 0; i < count; ++i) {

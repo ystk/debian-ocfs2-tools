@@ -18,13 +18,14 @@ PCMK_INCLUDES = -I/usr/include/pacemaker -I/usr/include/heartbeat/ $(GLIB_CFLAGS
 endif
 
 INCLUDES = -I$(TOPDIR)/include -I. $(PCMK_INCLUDES)
-LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb
+LIBO2CB_LIBS = -L$(TOPDIR)/libo2cb -lo2cb -ldlm_lt
 LIBO2CB_DEPS = $(TOPDIR)/libo2cb/libo2cb.a
 LIBOCFS2_LIBS = -L$(TOPDIR)/libocfs2 -locfs2
 LIBOCFS2_DEPS = $(TOPDIR)/libocfs2/libocfs2.a
 COROSYNC_LIBS = $(CPG_LDFLAGS) -lcpg
 OPENAIS_LIBS = $(AIS_LDFLAGS) -lSaCkpt
 DLMCONTROL_LIBS = -ldlmcontrol
+CRM_LIBS = -lcrmcluster -lstonithd -lcrmcommon
 
 ifdef OCFS2_DEBUG
 OPTS += -ggdb
@@ -67,7 +68,7 @@ DIST_FILES =				\
 ocfs2_controld.pcmk: $(PCMK_DAEMON_OBJS) $(LIBO2CB_DEPS)
 	$(LINK) $(GLIB_LIBS) $(LIBO2CB_LIBS) $(COM_ERR_LIBS) \
 		$(OPENAIS_LIBS) $(COROSYNC_LIBS) \
-		$(DLMCONTROL_LIBS) -lcrmcluster -lstonithd
+		$(DLMCONTROL_LIBS) $(CRM_LIBS)
 
 ocfs2_controld.cman: $(CMAN_DAEMON_OBJS) $(LIBO2CB_DEPS)
 	$(LINK) $(LIBO2CB_LIBS) $(COM_ERR_LIBS) $(OPENAIS_LIBS) \

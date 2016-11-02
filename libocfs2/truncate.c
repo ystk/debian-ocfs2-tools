@@ -30,9 +30,12 @@
 #include <unistd.h>
 #endif
 
+#include <assert.h>
+#include <errno.h>
 #include "ocfs2/ocfs2.h"
 
 struct truncate_ctxt {
+	uint64_t ino;
 	uint64_t new_size_in_clusters;
 	uint32_t new_i_clusters;
 	errcode_t (*free_clusters)(ocfs2_filesys *fs,
@@ -41,6 +44,23 @@ struct truncate_ctxt {
 				   void *free_data);
 	void *free_data;
 };
+
+static int ocfs2_truncate_clusters(ocfs2_filesys *fs,
+				   struct ocfs2_extent_rec *rec,
+				   uint64_t ino,
+				   uint32_t len,
+				   uint64_t start)
+{
+	if (!ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)) ||
+	    !(rec->e_flags & OCFS2_EXT_REFCOUNTED))
+		return ocfs2_free_clusters(fs, len, start);
+
+	assert(ino);
+
+	return ocfs2_decrease_refcount(fs, ino,
+				ocfs2_blocks_to_clusters(fs, start),
+				len, 1);
+}
 
 /*
  * Delete and free clusters if needed.  This only works with DEPTH_TRAVERSE.
@@ -129,7 +149,8 @@ static int truncate_iterate(ocfs2_filesys *fs,
 			ret = ctxt->free_clusters(fs, len, start,
 						  ctxt->free_data);
 		else
-			ret = ocfs2_free_clusters(fs, len, start);
+			ret = ocfs2_truncate_clusters(fs, rec, ctxt->ino,
+						      len, start);
 		if (ret)
 			goto bail;
 		ctxt->new_i_clusters -= len;
@@ -155,6 +176,7 @@ static errcode_t ocfs2_zero_tail_for_truncate(ocfs2_cached_inode *ci,
 	ocfs2_filesys *fs = ci->ci_fs;
 	uint64_t start_blk, p_blkno, contig_blocks, start_off;
 	int count, byte_counts, bpc = fs->fs_clustersize /fs->fs_blocksize;
+	uint16_t ext_flags;
 
 	if (new_size == 0)
 		return 0;
@@ -162,13 +184,29 @@ static errcode_t ocfs2_zero_tail_for_truncate(ocfs2_cached_inode *ci,
 	start_blk = new_size / fs->fs_blocksize;
 
 	ret = ocfs2_extent_map_get_blocks(ci, start_blk, 1,
-					  &p_blkno, &contig_blocks, NULL);
+					  &p_blkno, &contig_blocks, &ext_flags);
 	if (ret)
 		goto out;
 
 	/* Tail is a hole. */
 	if (!p_blkno)
 		goto out;
+
+	if (ext_flags & OCFS2_EXT_REFCOUNTED) {
+		uint32_t cpos = ocfs2_blocks_to_clusters(fs, start_blk);
+		ret = ocfs2_refcount_cow(ci, cpos, 1, cpos + 1);
+		if (ret)
+			goto out;
+
+		ret = ocfs2_extent_map_get_blocks(ci, start_blk, 1,
+						  &p_blkno, &contig_blocks,
+						  &ext_flags);
+		if (ret)
+			goto out;
+
+		assert(!(ext_flags & OCFS2_EXT_REFCOUNTED) && p_blkno);
+
+	}
 
 	/* calculate the total blocks we need to empty. */
 	count = bpc - (p_blkno & (bpc - 1));
@@ -213,6 +251,7 @@ static errcode_t ocfs2_zero_tail_and_truncate_full(ocfs2_filesys *fs,
 	struct truncate_ctxt ctxt;
 
 	new_size_in_blocks = ocfs2_blocks_in_bytes(fs, new_i_size);
+	ctxt.ino = ci->ci_blkno;
 	ctxt.new_i_clusters = ci->ci_inode->i_clusters;
 	ctxt.new_size_in_clusters =
 			ocfs2_clusters_in_blocks(fs, new_size_in_blocks);
@@ -245,6 +284,60 @@ errcode_t ocfs2_zero_tail_and_truncate(ocfs2_filesys *fs,
 						 new_clusters, NULL, NULL);
 }
 
+/*
+ * NOTE: ocfs2_truncate_inline() also handles fast symlink,
+ * since truncating for inline file and fasy symlink are
+ * almost the same thing per se.
+ */
+errcode_t ocfs2_truncate_inline(ocfs2_filesys *fs, uint64_t ino,
+				uint64_t new_i_size)
+{
+	errcode_t ret = 0;
+	char *buf = NULL;
+	struct ocfs2_dinode *di = NULL;
+	struct ocfs2_inline_data *idata = NULL;
+
+	if (!(fs->fs_flags & OCFS2_FLAG_RW))
+		return OCFS2_ET_RO_FILESYS;
+
+	ret = ocfs2_malloc_block(fs->fs_io, &buf);
+	if (ret)
+		return ret;
+
+	ret = ocfs2_read_inode(fs, ino, buf);
+	if (ret)
+		goto out_free_buf;
+
+	di = (struct ocfs2_dinode *)buf;
+	if (di->i_size < new_i_size) {
+		ret = EINVAL;
+		goto out_free_buf;
+	}
+
+	idata = &di->id2.i_data;
+
+	if (!(di->i_dyn_features & OCFS2_INLINE_DATA_FL) &&
+	    !(S_ISLNK(di->i_mode) && !di->i_clusters)) {
+		ret = EINVAL;
+		goto out_free_buf;
+	}
+
+	if (di->i_dyn_features & OCFS2_INLINE_DATA_FL)
+		memset(idata->id_data + new_i_size, 0, di->i_size - new_i_size);
+	else
+		memset(di->id2.i_symlink + new_i_size, 0,
+		       di->i_size - new_i_size);
+
+	di->i_size = new_i_size;
+
+	ret = ocfs2_write_inode(fs, ino, buf);
+
+out_free_buf:
+	if (buf)
+		ocfs2_free(&buf);
+	return ret;
+}
+
 /* XXX care about zeroing new clusters and final partially truncated 
  * clusters */
 errcode_t ocfs2_truncate_full(ocfs2_filesys *fs, uint64_t ino,
@@ -266,8 +359,14 @@ errcode_t ocfs2_truncate_full(ocfs2_filesys *fs, uint64_t ino,
 	if (ci->ci_inode->i_size == new_i_size)
 		goto out;
 
-	if (ci->ci_inode->i_size < new_i_size)
+	if (ci->ci_inode->i_size < new_i_size) {
 		ret = ocfs2_extend_file(fs, ino, new_i_size);
+		goto out;
+	}
+
+	if ((S_ISLNK(ci->ci_inode->i_mode) && !ci->ci_inode->i_clusters) ||
+	    (ci->ci_inode->i_dyn_features & OCFS2_INLINE_DATA_FL))
+		ret = ocfs2_truncate_inline(fs, ino, new_i_size);
 	else {
 		ret = ocfs2_zero_tail_and_truncate_full(fs, ci, new_i_size,
 							&new_clusters,
@@ -299,13 +398,14 @@ errcode_t ocfs2_truncate(ocfs2_filesys *fs, uint64_t ino, uint64_t new_i_size)
 	return ocfs2_truncate_full(fs, ino, new_i_size, NULL, NULL);
 }
 
-errcode_t ocfs2_xattr_value_truncate(ocfs2_filesys *fs,
+errcode_t ocfs2_xattr_value_truncate(ocfs2_filesys *fs, uint64_t ino,
 				     struct ocfs2_xattr_value_root *xv)
 {
 	struct truncate_ctxt ctxt;
 	int changed;
 	struct ocfs2_extent_list *el = &xv->xr_list;
 
+	ctxt.ino = ino;
 	ctxt.new_i_clusters = xv->xr_clusters;
 	ctxt.new_size_in_clusters = 0;
 
@@ -322,6 +422,11 @@ errcode_t ocfs2_xattr_tree_truncate(ocfs2_filesys *fs,
 	int changed;
 	struct ocfs2_extent_list *el = &xt->xt_list;
 
+	/*
+	 * ino is used to find refcount tree, as we never use refcount
+	 * in xattr tree, so set it to 0.
+	 */
+	ctxt.ino = 0;
 	ctxt.new_i_clusters = xt->xt_clusters;
 	ctxt.new_size_in_clusters = 0;
 
@@ -330,6 +435,22 @@ errcode_t ocfs2_xattr_tree_truncate(ocfs2_filesys *fs,
 					truncate_iterate,
 					&ctxt, &changed);
 }
+
+
+errcode_t ocfs2_dir_indexed_tree_truncate(ocfs2_filesys *fs,
+					struct ocfs2_dx_root_block *dx_root)
+{
+	struct truncate_ctxt ctxt;
+
+	memset(&ctxt, 0, sizeof (struct truncate_ctxt));
+	ctxt.new_i_clusters = dx_root->dr_clusters;
+	ctxt.new_size_in_clusters = 0;
+
+	return ocfs2_extent_iterate_dx_root(fs, dx_root,
+					OCFS2_EXTENT_FLAG_DEPTH_TRAVERSE,
+					NULL, truncate_iterate,	&ctxt);
+}
+
 
 #ifdef DEBUG_EXE
 #include <stdlib.h>

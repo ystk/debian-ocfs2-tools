@@ -34,7 +34,6 @@
 #include "ocfs2/bitops.h"
 #include "ocfs2/byteorder.h"
 
-#include "blockcheck.h"
 #include "crc32table.h"
 
 
@@ -361,7 +360,7 @@ errcode_t ocfs2_block_check_validate(void *data, size_t blocksize,
 	if (crc == check.bc_crc32e)
 		goto out;
 
-	err = OCFS2_ET_IO;
+	err = OCFS2_ET_BAD_CRC32;
 
 out:
 	bc->bc_crc32e = cpu_to_le32(check.bc_crc32e);
@@ -388,7 +387,8 @@ errcode_t ocfs2_validate_meta_ecc(ocfs2_filesys *fs, void *data,
 {
 	errcode_t err = 0;
 
-	if (ocfs2_meta_ecc(OCFS2_RAW_SB(fs->fs_super)))
+	if (ocfs2_meta_ecc(OCFS2_RAW_SB(fs->fs_super)) &&
+	    !(fs->fs_flags & OCFS2_FLAG_NO_ECC_CHECKS))
 		err = ocfs2_block_check_validate(data, fs->fs_blocksize, bc);
 
 	return err;

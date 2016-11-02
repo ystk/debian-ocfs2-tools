@@ -14,7 +14,13 @@
 %define brokenrhlibdir %{_libdir}
 %endif
 
-%define compile_py @@COMPILE_PY@@
+
+%define build_ocfs2console	0
+%define compile_py		0
+
+%if %{build_ocfs2console}
+%define compile_py		@@COMPILE_PY@@
+%endif
 
 Summary: Tools for managing the Oracle Cluster Filesystem 2
 Name: ocfs2-tools
@@ -36,7 +42,7 @@ BuildRoot: %{_tmppath}/ocfs2-tools-%{PACKAGE_VERSION}-%{PACKAGE_RELEASE}-root
 %description
 Tools to manage Oracle Cluster Filesystem 2 volumes.
 
-
+%if %{build_ocfs2console}
 %package -n ocfs2console
 Summary: GUI frontend for OCFS2 management
 Group: System Environment/Kernel
@@ -47,6 +53,7 @@ AutoReqProv: No
 %description -n ocfs2console
 GUI frontend for management and debugging of Oracle Cluster Filesystem 2
 volumes.
+%endif
 
 
 
@@ -67,7 +74,7 @@ develop ocfs2 filesystem-specific programs.
 
 
 %build
-%configure --disable-debug --prefix=/usr --mandir=/usr/share/man --libdir=%{brokenrhlibdir}
+%configure --disable-debug --enable-dynamic-ctl --prefix=/usr --mandir=/usr/share/man --libdir=%{brokenrhlibdir}
 make
 
 
@@ -108,17 +115,20 @@ fi
 
 %files
 %defattr(-,root,root)
-%doc README.O2CB COPYING CREDITS MAINTAINERS
-%doc documentation/users_guide.txt
+%doc COPYING CREDITS MAINTAINERS
 /sbin/fsck.ocfs2
 /sbin/mkfs.ocfs2
 /sbin/mounted.ocfs2
 /sbin/tunefs.ocfs2
 /sbin/debugfs.ocfs2
 /sbin/o2cb_ctl
+/sbin/o2cb
 /sbin/mount.ocfs2
 /sbin/o2image
+/sbin/o2cluster
 /sbin/ocfs2_hb_ctl
+/usr/bin/o2info
+/usr/sbin/o2hbmonitor
 /etc/init.d/o2cb
 /etc/init.d/ocfs2
 %config(noreplace) /etc/sysconfig/o2cb
@@ -130,16 +140,25 @@ fi
 /usr/share/man/man8/mount.ocfs2.8.gz
 /usr/share/man/man8/mounted.ocfs2.8.gz
 /usr/share/man/man8/o2cb_ctl.8.gz
+/usr/share/man/man8/o2cb.8.gz
 /usr/share/man/man8/ocfs2_hb_ctl.8.gz
 /usr/share/man/man8/o2image.8.gz
 /usr/share/man/man7/o2cb.7.gz
+/usr/share/man/man1/o2info.1.gz
+/usr/share/man/man8/o2hbmonitor.8.gz
+/usr/share/man/man5/ocfs2.cluster.conf.5.gz
+/usr/share/man/man5/o2cb.sysconfig.5.gz
+/usr/share/man/man7/ocfs2.7.gz
+/usr/share/man/man8/o2cluster.8.gz
 
 
+%if %{build_ocfs2console}
 %files -n ocfs2console
 %defattr(-,root,root)
 %{brokenrhlibdir}/python@@PYVERSION@@/site-packages/ocfs2interface
 /usr/sbin/ocfs2console
 /usr/share/man/man8/ocfs2console.8.gz
+%endif
 
 %files -n ocfs2-tools-devel
 %defattr(-,root,root)

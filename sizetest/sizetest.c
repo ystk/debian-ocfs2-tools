@@ -107,7 +107,7 @@ static void print_ocfs2_extent_block(void)
 	SHOW_OFFSET(struct ocfs2_extent_block, h_suballoc_bit);
 	SHOW_OFFSET(struct ocfs2_extent_block, h_fs_generation);
 	SHOW_OFFSET(struct ocfs2_extent_block, h_blkno);
-	SHOW_OFFSET(struct ocfs2_extent_block, h_reserved3);
+	SHOW_OFFSET(struct ocfs2_extent_block, h_suballoc_loc);
 	SHOW_OFFSET(struct ocfs2_extent_block, h_next_leaf_blk);
 	SHOW_OFFSET(struct ocfs2_extent_block, h_list);
 	
@@ -144,7 +144,7 @@ static void print_ocfs2_super_block(void)
 	SHOW_OFFSET(struct ocfs2_super_block, s_cluster_info);
 	SHOW_OFFSET(struct ocfs2_super_block, s_xattr_inline_size);
 	SHOW_OFFSET(struct ocfs2_super_block, s_reserved0);
-	SHOW_OFFSET(struct ocfs2_super_block, s_reserved1);
+	SHOW_OFFSET(struct ocfs2_super_block, s_dx_seed);
 	SHOW_OFFSET(struct ocfs2_super_block, s_reserved2);
 	
         END_TYPE(struct ocfs2_super_block);
@@ -173,7 +173,7 @@ static void print_ocfs2_dinode(void)
 	SHOW_OFFSET(struct ocfs2_dinode, i_generation);
 	SHOW_OFFSET(struct ocfs2_dinode, i_suballoc_slot);
 	SHOW_OFFSET(struct ocfs2_dinode, i_suballoc_bit);
-	SHOW_OFFSET(struct ocfs2_dinode, i_reserved0);
+	SHOW_OFFSET(struct ocfs2_dinode, i_links_count_hi);
 	SHOW_OFFSET(struct ocfs2_dinode, i_xattr_inline_size);
 	SHOW_OFFSET(struct ocfs2_dinode, i_clusters);
 	SHOW_OFFSET(struct ocfs2_dinode, i_uid);
@@ -197,6 +197,9 @@ static void print_ocfs2_dinode(void)
 	SHOW_OFFSET(struct ocfs2_dinode, i_dyn_features);
 	SHOW_OFFSET(struct ocfs2_dinode, i_xattr_loc);
 	SHOW_OFFSET(struct ocfs2_dinode, i_check);
+	SHOW_OFFSET(struct ocfs2_dinode, i_dx_root);
+	SHOW_OFFSET(struct ocfs2_dinode, i_refcount_loc);
+	SHOW_OFFSET(struct ocfs2_dinode, i_suballoc_loc);
 	SHOW_OFFSET(struct ocfs2_dinode, i_reserved2);
 
 	SHOW_OFFSET(struct ocfs2_dinode, id1.i_pad1);
@@ -249,6 +252,8 @@ static void print_ocfs2_group_desc(void)
 	SHOW_OFFSET(struct ocfs2_group_desc, bg_check);
 	SHOW_OFFSET(struct ocfs2_group_desc, bg_reserved2);
 	SHOW_OFFSET(struct ocfs2_group_desc, bg_bitmap);
+	SHOW_OFFSET(struct ocfs2_group_desc, bg_bitmap_filler);
+	SHOW_OFFSET(struct ocfs2_group_desc, bg_list);
 	
         END_TYPE(struct ocfs2_group_desc);
         printf("\n");

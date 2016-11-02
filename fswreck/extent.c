@@ -103,8 +103,8 @@ static void custom_extend_allocation(ocfs2_filesys *fs, uint64_t ino,
 		 * we insert each cluster in reverse. */
 		for(i = n_clusters; i; --i) {
 			tmpblk = blkno + ocfs2_clusters_to_blocks(fs, i - 1);
-		 	ret = ocfs2_insert_extent(fs, ino, offset++,
-						  tmpblk, 1, 0);
+			ret = ocfs2_inode_insert_extent(fs, ino, offset++,
+							tmpblk, 1, 0);
 			if (ret) 
 				FSWRK_COM_FATAL(progname, ret);	
 		}
@@ -310,6 +310,18 @@ static void mess_up_record(ocfs2_filesys *fs, uint64_t blkno,
 				"at cpos %"PRIu32" unwritten\n",
 				blkno, er->e_cpos);
 			break;
+		case EXTENT_MARKED_REFCOUNTED:
+			if (ocfs2_refcount_tree(OCFS2_RAW_SB(fs->fs_super)))
+				FSWRK_FATAL("Cannot exercise "
+					    "EXTENT_MARKED_REFCOUNTED on a "
+					    "filesystem with refcounted "
+					    "extents supported (obviously)");
+			er->e_flags |= OCFS2_EXT_REFCOUNTED;
+			fprintf(stdout, "EXTENT_MARKED_REFCOUNTED: "
+				"Corrupt inode#%"PRIu64", mark extent "
+				"at cpos %"PRIu32" refcounted\n",
+				blkno, er->e_cpos);
+			break;
 		case EXTENT_BLKNO_UNALIGNED: 
 			er->e_blkno += 1;
 			fprintf(stdout, "EXTENT_BLKNO_UNALIGNED: "
@@ -333,6 +345,32 @@ static void mess_up_record(ocfs2_filesys *fs, uint64_t blkno,
 			"Corrupt inode#%"PRIu64", change blkno "
 			" from %"PRIu64 " to %"PRIu64"\n",
 			blkno, oldno, er->e_blkno);
+			break;
+		case EXTENT_OVERLAP:
+			ret = ocfs2_extend_allocation(fs, blkno, 2);
+			if (ret)
+				FSWRK_COM_FATAL(progname, ret);
+			ret = ocfs2_read_inode(fs, blkno, buf);
+			if (ret)
+				FSWRK_COM_FATAL(progname, ret);
+			er = &(el->l_recs[1]);
+			er->e_cpos -= 1;
+			fprintf(stdout, "EXTENT_OVERLAP: "
+			"Corrupt inode#%"PRIu64", change cpos "
+			" to overlap\n", blkno);
+			break;
+		case EXTENT_HOLE:
+			ret = ocfs2_extend_allocation(fs, blkno, 2);
+			if (ret)
+				FSWRK_COM_FATAL(progname, ret);
+			ret = ocfs2_read_inode(fs, blkno, buf);
+			if (ret)
+				FSWRK_COM_FATAL(progname, ret);
+			er = &(el->l_recs[1]);
+			er->e_cpos += 11;
+			fprintf(stdout, "EXTENT_HOLE: "
+			"Corrupt inode#%"PRIu64", change cpos "
+			" to increase hole\n", blkno);
 			break;
 		default:
 			goto bail;

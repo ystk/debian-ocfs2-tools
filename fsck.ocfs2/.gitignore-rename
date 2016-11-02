@@ -1,0 +1,8 @@
+cscope*
+stamp-md5
+*.sw?
+*.cmd
+fsck.ocfs2
+*.8
+*.d
+prompt-codes.h

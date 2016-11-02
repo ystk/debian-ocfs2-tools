@@ -25,7 +25,6 @@
 #ifndef __CORRUPT_H
 #define __CORRUPT_H
 
-void corrupt_chains(ocfs2_filesys *fs, int code, uint16_t slotnum);
 void corrupt_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum);
 void corrupt_sys_file(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum);
 void corrupt_group_desc(ocfs2_filesys *fs, enum fsck_type type,
@@ -35,5 +34,9 @@ void corrupt_local_alloc(ocfs2_filesys *fs, enum fsck_type type,
 			 uint16_t slotnum);
 void corrupt_truncate_log(ocfs2_filesys *fs, enum fsck_type type,
 			  uint16_t slotnum);
+void corrupt_refcount(ocfs2_filesys *fs, enum fsck_type type, uint16_t slotnum);
+void corrupt_discontig_bg(ocfs2_filesys *fs, enum fsck_type type,
+			  uint16_t slotnum);
+void create_named_directory(ocfs2_filesys *fs, char *name, uint64_t *blkno);
 
 #endif		/* __CORRUPT_H */

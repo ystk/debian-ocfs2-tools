@@ -2,7 +2,7 @@ TOPDIR = ..
 
 include $(TOPDIR)/Preamble.make
 
-UNINST_PROGRAMS = find_hardlinks find_dup_extents find_inode_paths set_random_bits decode_lockres encode_lockres mark_journal_dirty find_allocation_fragments compute_groups
+UNINST_PROGRAMS = find_hardlinks find_dup_extents find_inode_paths set_random_bits decode_lockres encode_lockres mark_journal_dirty find_allocation_fragments compute_groups check_metaecc resize_slotmap
 
 INCLUDES = -I$(TOPDIR)/include
 
@@ -15,8 +15,10 @@ ENCODE_LOCKRES_CFILES = encode_lockres.c
 MARK_JOURNAL_DIRTY_CFILES = mark_journal_dirty.c
 FIND_ALLOC_FRAG_CFILES = find_allocation_fragments.c
 COMPUTE_GROUPS_CFILES = compute_groups.c
+CHECK_METAECC_CFILES = check_metaecc.c
+RESIZE_SLOTMAP_CFILES = resize_slotmap.c
 
-DIST_FILES = $(FIND_HARDLINKS_CFILES) $(FIND_DUP_EXTENTS_CFILES) $(FIND_INODE_PATHS_CFILES) $(SET_RANDOM_BITS_CFILES) $(DECODE_LOCKRES_CFILES) $(ENCODE_LOCKRES_CFILES) $(MARK_JOURNAL_DIRTY_CFILES) $(FIND_ALLOC_FRAG_CFILES) $(COMPUTE_GROUPS_CFILES)
+DIST_FILES = $(FIND_HARDLINKS_CFILES) $(FIND_DUP_EXTENTS_CFILES) $(FIND_INODE_PATHS_CFILES) $(SET_RANDOM_BITS_CFILES) $(DECODE_LOCKRES_CFILES) $(ENCODE_LOCKRES_CFILES) $(MARK_JOURNAL_DIRTY_CFILES) $(FIND_ALLOC_FRAG_CFILES) $(COMPUTE_GROUPS_CFILES) $(CHECK_METAECC_CFILES) $(RESIZE_SLOTMAP_CFILES)
 
 FIND_HARDLINKS_OBJS = $(subst .c,.o,$(FIND_HARDLINKS_CFILES))
 FIND_DUP_EXTENTS_OBJS = $(subst .c,.o,$(FIND_DUP_EXTENTS_CFILES))
@@ -27,9 +29,11 @@ ENCODE_LOCKRES_OBJS  = $(subst .c,.o,$(ENCODE_LOCKRES_CFILES))
 MARK_JOURNAL_DIRTY_OBJS = $(subst .c,.o,$(MARK_JOURNAL_DIRTY_CFILES))
 FIND_ALLOC_FRAG_OBJS = $(subst .c,.o,$(FIND_ALLOC_FRAG_CFILES))
 COMPUTE_GROUPS_OBJS = $(subst .c,.o,$(COMPUTE_GROUPS_CFILES))
+CHECK_METAECC_OBJS = $(subst .c,.o,$(CHECK_METAECC_CFILES))
+RESIZE_SLOTMAP_OBJS = $(subst .c,.o,$(RESIZE_SLOTMAP_CFILES))
 
 LIBOCFS2 = ../libocfs2/libocfs2.a
-EXTRAS_LIBS = $(LIBOCFS2) $(COM_ERR_LIBS)
+EXTRAS_LIBS = $(LIBOCFS2) $(COM_ERR_LIBS) $(AIO_LIBS)
 
 find_hardlinks: $(FIND_HARDLINKS_OBJS) $(LIBOCFS2)
 	$(LINK) $(EXTRAS_LIBS)
@@ -56,6 +60,12 @@ find_allocation_fragments: $(FIND_ALLOC_FRAG_OBJS) $(LIBOCFS2)
 	$(LINK) $(EXTRAS_LIBS)
 
 compute_groups: $(COMPUTE_GROUPS_OBJS) $(LIBOCFS2)
+	$(LINK) $(EXTRAS_LIBS)
+
+check_metaecc: $(CHECK_METAECC_OBJS) $(LIBOCFS2)
+	$(LINK) $(EXTRAS_LIBS)
+
+resize_slotmap: $(RESIZE_SLOTMAP_OBJS) $(LIBOCFS2)
 	$(LINK) $(EXTRAS_LIBS)
 
 include $(TOPDIR)/Postamble.make

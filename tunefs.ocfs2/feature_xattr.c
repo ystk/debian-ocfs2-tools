@@ -51,7 +51,7 @@ static void empty_xattr_context(struct xattr_context *ctxt)
 	}
 }
 
-static errcode_t remove_xattr_entry(ocfs2_filesys *fs,
+static errcode_t remove_xattr_entry(ocfs2_filesys *fs, uint64_t ino,
 				    struct ocfs2_xattr_header *xh)
 {
 	int i;
@@ -65,7 +65,7 @@ static errcode_t remove_xattr_entry(ocfs2_filesys *fs,
 				(struct ocfs2_xattr_value_root *)
 				((void *)xh + xe->xe_name_offset +
 				OCFS2_XATTR_SIZE(xe->xe_name_len));
-			ret = ocfs2_xattr_value_truncate(fs, xv);
+			ret = ocfs2_xattr_value_truncate(fs, ino, xv);
 			if (ret)
 				break;
 		}
@@ -75,6 +75,7 @@ static errcode_t remove_xattr_entry(ocfs2_filesys *fs,
 }
 
 static errcode_t remove_xattr_buckets(ocfs2_filesys *fs,
+				      uint64_t ino,
 				      uint64_t blkno,
 				      uint32_t clusters)
 {
@@ -109,7 +110,7 @@ static errcode_t remove_xattr_buckets(ocfs2_filesys *fs,
 		if (i == 0)
 			num_buckets = xh->xh_num_buckets;
 
-		ret = remove_xattr_entry(fs, xh);
+		ret = remove_xattr_entry(fs, ino, xh);
 		if (ret)
 			break;
 	}
@@ -121,7 +122,7 @@ out:
 }
 
 
-static errcode_t remove_xattr_index_block(ocfs2_filesys *fs,
+static errcode_t remove_xattr_index_block(ocfs2_filesys *fs, uint64_t ino,
 					  struct ocfs2_xattr_block *xb)
 {
 	struct ocfs2_extent_list *el = &xb->xb_attrs.xb_root.xt_list;
@@ -141,7 +142,7 @@ static errcode_t remove_xattr_index_block(ocfs2_filesys *fs,
 			goto out;
 		}
 
-		ret = remove_xattr_buckets(fs, p_blkno, num_clusters);
+		ret = remove_xattr_buckets(fs, ino, p_blkno, num_clusters);
 		if (ret) {
 			tcom_err(ret, "while iterating bucket"
 				 " of extended attributes ");
@@ -184,14 +185,14 @@ static errcode_t remove_xattr_block(ocfs2_filesys *fs,
 	if (!(xb->xb_flags & OCFS2_XATTR_INDEXED)) {
 		struct ocfs2_xattr_header *xh = &xb->xb_attrs.xb_header;
 
-		ret = remove_xattr_entry(fs, xh);
+		ret = remove_xattr_entry(fs, di->i_blkno, xh);
 		if (ret) {
 			tcom_err(ret, "while trying to remove extended"
 				 " attributes in external block ");
 			goto out;
 		}
 	} else {
-		ret = remove_xattr_index_block(fs, xb);
+		ret = remove_xattr_index_block(fs, di->i_blkno, xb);
 		if (ret) {
 			tcom_err(ret, "while trying to remove extended"
 				 " attributes in index block ");
@@ -229,7 +230,7 @@ static errcode_t remove_xattr_ibody(ocfs2_filesys *fs,
 		 ((void *)di + fs->fs_blocksize -
 		  di->i_xattr_inline_size);
 
-	ret = remove_xattr_entry(fs, xh);
+	ret = remove_xattr_entry(fs, di->i_blkno, xh);
 	if (ret) {
 		tcom_err(ret, "while trying to remove extended"
 			 " attributes in ibody ");
@@ -351,7 +352,10 @@ static int enable_xattr(ocfs2_filesys *fs, int flag)
 		goto out;
 	}
 
-	super->s_uuid_hash =
+	/* s_uuid_hash is also used by Indexed Dirs */
+	if (!OCFS2_HAS_INCOMPAT_FEATURE(super,
+					OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS))
+		super->s_uuid_hash =
 			ocfs2_xattr_uuid_hash((unsigned char *)super->s_uuid);
 	super->s_xattr_inline_size = OCFS2_MIN_XATTR_INLINE_SIZE;
 	OCFS2_SET_INCOMPAT_FEATURE(super, OCFS2_FEATURE_INCOMPAT_XATTR);
@@ -423,7 +427,10 @@ static int disable_xattr(ocfs2_filesys *fs, int flag)
 	}
 	tools_progress_step(prog, 1);
 
-	super->s_uuid_hash = 0;
+	/* s_uuid_hash is also used by Indexed Dirs */
+	if (!OCFS2_HAS_INCOMPAT_FEATURE(super,
+					OCFS2_FEATURE_INCOMPAT_INDEXED_DIRS))
+		super->s_uuid_hash = 0;
 	super->s_xattr_inline_size = 0;
 	OCFS2_CLEAR_INCOMPAT_FEATURE(super, OCFS2_FEATURE_INCOMPAT_XATTR);
 

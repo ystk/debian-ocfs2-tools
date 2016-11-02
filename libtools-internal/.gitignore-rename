@@ -1,0 +1,4 @@
+cscope.*
+libtools-internal.a
+*.d
+debug_*

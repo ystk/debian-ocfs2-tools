@@ -1,7 +1,7 @@
 #!/bin/bash
 # init fragment for O2CB.
 #
-# chkconfig: 2345 24 20
+# chkconfig: 2345 24 19
 # description: Load O2CB cluster services at system boot.
 #
 ### BEGIN INIT INFO
@@ -31,6 +31,10 @@ CLUSTERCONF=/etc/ocfs2/cluster.conf
 OCFS2_SYS_DIR="/sys/fs/ocfs2"
 LOADED_PLUGINS_FILE="${OCFS2_SYS_DIR}/loaded_cluster_plugins"
 CLUSTER_STACK_FILE="${OCFS2_SYS_DIR}/cluster_stack"
+DLMFS_CAPABILITIES_FILE='/sys/module/ocfs2_dlmfs/parameters/capabilities'
+DLMFS_DIR="/dlm"
+DLMFS_MAGIC="76a9f425"
+DEBUGFS_DIR="/sys/kernel/debug"
 
 if [ -f /etc/sysconfig/o2cb ]
 then
@@ -81,6 +85,21 @@ configfs_path()
     fi
 }
 
+touch_lockfile()
+{
+    if [ -d /var/lock/subsys ]
+    then
+        touch /var/lock/subsys/o2cb
+    fi
+}
+
+remove_lockfile()
+{
+    if [ -e /var/lock/subsys/o2cb ]
+    then
+        rm /var/lock/subsys/o2cb
+    fi
+}
 
 #
 # if_fail()
@@ -203,7 +222,7 @@ read_timeout()
     done
 }
 
-set_timeouts()
+set_timeouts_o2cb()
 {
     O2CB_HEARTBEAT_THRESHOLD_FILE_OLD=/proc/fs/ocfs2_nodemanager/hb_dead_threshold
     O2CB_HEARTBEAT_THRESHOLD_FILE=$(configfs_path)/cluster/${CLUSTER}/heartbeat/dead_threshold
@@ -237,14 +256,14 @@ set_timeouts()
     fi
 }
 
-show_timeouts()
+show_timeouts_o2cb()
 {
 
     O2CB_HEARTBEAT_THRESHOLD_FILE_OLD=/proc/fs/ocfs2_nodemanager/hb_dead_threshold
     O2CB_HEARTBEAT_THRESHOLD_FILE=$(configfs_path)/cluster/${CLUSTER}/heartbeat/dead_threshold
     if [ -f "$O2CB_HEARTBEAT_THRESHOLD_FILE" ]; then
         VAL=`cat "$O2CB_HEARTBEAT_THRESHOLD_FILE"`
-        echo "Heartbeat dead threshold = ${VAL}"
+        echo "  Heartbeat dead threshold: ${VAL}"
     elif [ -f "$O2CB_HEARTBEAT_THRESHOLD_FILE_OLD" ]; then
         VAL=`cat "$O2CB_HEARTBEAT_THRESHOLD_FILE_OLD"`
         echo "  Heartbeat dead threshold: ${VAL}"
@@ -267,6 +286,22 @@ show_timeouts()
         VAL=`cat "$O2CB_RECONNECT_DELAY_MS_FILE"`
         echo "  Network reconnect delay: ${VAL}"
     fi
+}
+
+#
+# return 1 if global heartbeat enabled
+#
+global_heartbeat_enabled_o2cb()
+{
+    O2CB_HEARTBEAT_MODE_FILE=$(configfs_path)/cluster/${CLUSTER}/heartbeat/mode
+    VAL="local"
+    if [ -f "$O2CB_HEARTBEAT_MODE_FILE" ]; then
+        VAL=$(cat "$O2CB_HEARTBEAT_MODE_FILE")
+    fi
+    if [ "${VAL}" = "global" ]; then
+        return 1;
+    fi
+    return 0;
 }
 
 #
@@ -582,6 +617,19 @@ mount_filesystem()
     return 0
 }
 
+o2cbmounts()
+{
+    if [ "$#" != "1" -o -z "$1" ]
+    then
+        echo "o2cbmounts(): Missing arguments" >&2
+        exit 1
+    fi
+
+    FSNAME="$1"
+
+    LC_ALL=C awk -v FSNAME=$FSNAME 'BEGIN {fsname = FSNAME;} $3 == fsname  { print $2 }' /proc/mounts
+}
+
 #
 # unmount_filesystem()
 # Unmount a pseudo-filesystem of type $1 from mountpoint $2.  It will
@@ -602,14 +650,34 @@ unmount_filesystem()
     if check_filesystem "$FSNAME" "$MOUNTPOINT"
     then
         echo -n "Unmounting ${FSNAME} filesystem: "
-        umount $MOUNTPOINT
-        RC=$?
-        if [ $RC != 0 ]
+        remaining=$(o2cbmounts $FSNAME)
+        sig=
+        retry=3
+        while [ -n "$remaining" -a "$retry" -gt 0 ]
+        do
+            if [ "$retry" -lt 3 ]; then
+                echo -n "Retry unmounting $FSNAME} filesystem: "
+            fi
+
+            umount $MOUNTPOINT
+            RC=$?
+            if_fail $RC
+
+            remaining=$(o2cbmounts $FSNAME)
+            [ -z "$remaining" ] && break
+
+            fuser -km $sig $remaining >/dev/null 2>&1
+            sleep 5
+            retry=$(($retry - 1))
+            sig=-9
+        done
+	
+        remaining=$(o2cbmounts $FSNAME)
+        if [ -n "$remaining" ]
         then
             echo "Unable to unmount ${FSNAME} filesystem" >&2
             return 1
         fi
-        if_fail $RC  # For the success string
     fi
 
     unload_filesystem "$FSNAME"
@@ -720,15 +788,57 @@ kill_daemon()
 }
 
 #
-# check_heartbeat()
+# list_nodes_o2cb()
 #
-# 0 is hb not active, 1 is error, 2 is hb active
+list_nodes_o2cb()
+{
+    check_filesystem "debugfs" "$DEBUGFS_DIR"
+    if [ "$?" -ne "0" ]
+    then
+        return
+    fi
+
+    nodestr=$(cat $DEBUGFS_DIR/o2hb/livenodes)
+    echo "Nodes in O2CB cluster: $nodestr"
+}
+
 #
-check_heartbeat()
+# list_heartbeat_o2cb()
+#
+list_heartbeat_o2cb()
 {
     if [ "$#" -lt "1" -o -z "$1" ]
     then
-        echo "check_heartbeat(): Requires an argument" >&2
+        echo "list_heartbeat_o2cb(): Requires an argument" >&2
+        return 1
+    fi
+    CLUSTER="$1"
+
+    RC=0
+    if [ -d "$(configfs_path)/cluster/${CLUSTER}/heartbeat/" ]
+    then
+        ls -1 "$(configfs_path)/cluster/${CLUSTER}/heartbeat/" | while read HBUUID
+        do
+            if [ -d "$(configfs_path)/cluster/${CLUSTER}/heartbeat/${HBUUID}" ]
+            then
+                dev=$(cat "$(configfs_path)/cluster/${CLUSTER}/heartbeat/${HBUUID}/dev")
+                echo "  ${regionstr}${HBUUID} /dev/${dev}"
+            fi
+        done
+    fi
+}
+
+
+#
+# check_heartbeat_o2cb()
+#
+# 0 is hb not active, 1 is error, 2 is hb active
+#
+check_heartbeat_o2cb()
+{
+    if [ "$#" -lt "1" -o -z "$1" ]
+    then
+        echo "check_heartbeat_o2cb(): Requires an argument" >&2
         return 1
     fi
     CLUSTER="$1"
@@ -753,14 +863,14 @@ check_heartbeat()
 }
 
 #
-# clean_heartbeat()
+# clean_heartbeat_o2cb()
 # Removes the inactive heartbeat regions
 #
-clean_heartbeat()
+clean_heartbeat_o2cb()
 {
     if [ "$#" -lt "1" -o -z "$1" ]
     then
-        echo "clean_heartbeat(): Requires an argument" >&2
+        echo "clean_heartbeat_o2cb(): Requires an argument" >&2
         return 1
     fi
     CLUSTER="$1"
@@ -770,7 +880,7 @@ clean_heartbeat()
         return
     fi
 
-    echo -n "Cleaning heartbeat on ${CLUSTER}: "
+    echo -n "Cleaning heartbeat on cluster \"${CLUSTER}\": "
 
     ls -1 "$(configfs_path)/cluster/${CLUSTER}/heartbeat/" | while read HBUUID
     do
@@ -805,16 +915,16 @@ clean_heartbeat()
 }
 
 #
-# clean_cluster()
+# clean_cluster_o2cb()
 # Force cleans configured cluster
 #
 # 0 is clean, 1 is error, 2 is not clean
 #
-clean_cluster()
+clean_cluster_o2cb()
 {
     if [ "$#" -lt "1" -o -z "$1" ]
     then
-        echo "clean_cluster(): Requires an argument" >&2
+        echo "clean_cluster_o2cb(): Requires an argument" >&2
         return 1
     fi
     CLUSTER="$1"
@@ -893,10 +1003,79 @@ load_stack_o2cb()
         fi
     fi
 
-    mount_filesystem "ocfs2_dlmfs" "/dlm"
+    mount_filesystem "ocfs2_dlmfs" $DLMFS_DIR
     if_fail $?
 
     return 0
+}
+
+# Return the list of userdlm domains
+#
+userdlm_domains()
+{
+    magic=$(stat -f --printf="%t" ${DLMFS_DIR})
+    if [ "x$magic" = "x$DLMFS_MAGIC" ]
+    then
+        ls ${DLMFS_DIR}
+    fi
+}
+
+#
+# Print userdlm domains
+#
+userdlm_status()
+{
+    [ -n "$(userdlm_domains)" ] && {
+        echo "Active userdlm domains: " $(userdlm_domains)
+    }
+}
+
+#
+# Force removes all userdlm domains
+#
+clean_userdlm_domains()
+{
+    # Cleanup only if mounted
+    magic=$(stat -f --printf="%t" ${DLMFS_DIR})
+    if [ "x$magic" = "x$DLMFS_MAGIC" ]
+    then
+        echo -n "Clean userdlm domains: "
+        # Kill all processes accessing dlmfs
+        fuser -km -9 ${DLMFS_DIR} >/dev/null 2>&1
+
+        # Remove all domains and locks
+        for domain in $(userdlm_domains)
+        do
+            domain_path="${DLMFS_DIR}/${domain}"
+            magic=$(stat -f --printf="%t" ${domain_path})
+            if [ "x$magic" = "x$DLMFS_MAGIC" ]
+            then
+                rm -rf ${domain_path}
+            fi
+        done
+        echo "OK"
+    fi
+}
+
+#
+# dlmfs_user_capable()
+# Check if dlmfs supports user stacks.
+#
+# 0 is yes, 1 is no.
+#
+dlmfs_user_capable()
+{
+    if [ -e "$DLMFS_CAPABILITIES_FILE" ]
+    then
+        CAP_LINE="$(awk '/\ystackglue\y/{print}' "$DLMFS_CAPABILITIES_FILE" 2>/dev/null)"
+    else
+        CAP_LINE="$(modinfo ocfs2_dlmfs 2>/dev/null |
+                        awk '/parm:[ \t]*capabilities:.*\ystackglue\y/{
+                                print
+                            }')"
+    fi
+
+    test x"$CAP_LINE" != x
 }
 
 #
@@ -937,6 +1116,14 @@ load_stack_user()
         [ "$?" != 0 ] && if_fail 1 "Unable to load module \"$PLUGIN_MODULE\""
         if_fail 0
     fi
+
+    if dlmfs_user_capable
+    then
+        mount_filesystem "ocfs2_dlmfs" $DLMFS_DIR
+        if_fail $?
+    fi
+
+    return 0
 }
 
 #
@@ -989,7 +1176,7 @@ unload_stack_o2cb()
         fi
     fi
 
-    unmount_filesystem "ocfs2_dlmfs" "/dlm"
+    unmount_filesystem "ocfs2_dlmfs" $DLMFS_DIR
     if_fail $?
 
     unload_stack_plugins
@@ -1011,6 +1198,9 @@ unload_stack_user()
         echo "Unable to unload modules as the cluster is still online" >&2
         exit 1
     fi
+
+    unmount_filesystem "ocfs2_dlmfs" $DLMFS_DIR
+    if_fail $?
 
     unload_stack_plugins
 }
@@ -1041,7 +1231,7 @@ status_stack_plugin()
 status_stack_o2cb()
 {
     status_stack_plugin
-    status_filesystem "ocfs2_dlmfs" "/dlm"
+    status_filesystem "ocfs2_dlmfs" $DLMFS_DIR
 }
 
 status_stack_user()
@@ -1129,6 +1319,8 @@ load()
 {
     PLUGIN="$(select_stack_plugin)"
 
+    touch_lockfile
+
     # XXX: SPECIAL CASE!  We must load configfs for configfs_path() to work
     load_filesystem "configfs"
     if_fail $?
@@ -1150,11 +1342,11 @@ load_status()
     return 0
 }
 
-online_o2cb()
+register_cluster_o2cb()
 {
     if [ "$#" -lt "1" -o -z "$1" ]
     then
-        echo "online_o2cb(): Requires an argument" >&2
+        echo "register_cluster_o2cb(): Requires an argument" >&2
         return 1
     fi
     CLUSTER="$1"
@@ -1165,21 +1357,182 @@ online_o2cb()
         if_fail 1
     fi
 
-    echo -n "Starting O2CB cluster ${CLUSTER}: "
-    OUTPUT="`o2cb_ctl -H -n "${CLUSTER}" -t cluster -a online=yes 2>&1`"
+    echo -n "Registering O2CB cluster \"${CLUSTER}\": "
+    OUTPUT=$(o2cb register-cluster "${CLUSTER}" 2>&1)
     if [ $? = 0 ]
     then
-        set_timeouts
         echo "OK"
-        return
+        return 0
     else
         echo "Failed"
         echo "$OUTPUT"
     fi
 
-    echo -n "Stopping O2CB cluster ${CLUSTER}: "
-    OUTPUT="`o2cb_ctl -H -n "${CLUSTER}" -t cluster -a online=no 2>&1`"
-    if_fail "$?" "$OUTPUT"
+    return 1
+}
+
+unregister_cluster_o2cb()
+{
+    if [ "$#" -lt "1" -o -z "$1" ]
+    then
+        echo "unregister_cluster_o2cb(): Requires an argument" >&2
+        return 1
+    fi
+    CLUSTER="$1"
+
+    echo -n "Unregistering O2CB cluster \"${CLUSTER}\": "
+    OUTPUT=$(o2cb unregister-cluster "${CLUSTER}" 2>&1)
+    if [ $? = 0 ]
+    then
+        echo "OK"
+        return 0
+    else
+        echo "Failed"
+        echo "$OUTPUT"
+    fi
+
+    return 1
+}
+
+#
+# check_register_o2cb()
+#
+# 0 is not registered, 1 is error, 2 is registered
+#
+check_register_o2cb()
+{
+    if [ "$#" -lt "1" -o -z "$1" ]
+    then
+        echo "check_register_o2cb(): Requires an argument" >&2
+        return 1
+    fi
+    CLUSTER="$1"
+
+    RC=0
+    if [ -d "$(configfs_path)/cluster/${CLUSTER}/node/" ]
+    then
+        ls -1 "$(configfs_path)/cluster/${CLUSTER}/node/" | while read NODE
+        do
+            LOCAL="`cat \"$(configfs_path)/cluster/${CLUSTER}/node/${NODE}/local\"`"
+            if [ $LOCAL = 1 ]
+            then
+                return 2
+            fi
+        done
+        if [ $? = 2 ]
+        then
+            RC=2
+        fi
+    fi
+    return $RC
+}
+
+start_global_heartbeat_o2cb()
+{
+    if [ "$#" -lt "1" -o -z "$1" ]
+    then
+        echo "start_global_heartbeat_o2cb(): Requires an argument" >&2
+        return 1
+    fi
+    CLUSTER="$1"
+
+    if ! [ -f ${CLUSTERCONF} ]
+    then
+        echo -n "Checking O2CB cluster configuration : "
+        if_fail 1
+    fi
+
+    global_heartbeat_enabled_o2cb
+    if [ $? -ne 1 ]
+    then
+        return 0;
+    fi
+
+    echo -n "Starting global heartbeat for cluster \"${CLUSTER}\": "
+    OUTPUT=$(o2cb start-heartbeat "${CLUSTER}" 2>&1)
+    if [ $? = 0 ]
+    then
+        echo "OK"
+        return 0
+    else
+        echo "Failed"
+        echo "$OUTPUT"
+    fi
+
+    return 1
+}
+
+stop_global_heartbeat_o2cb()
+{
+    if [ "$#" -lt "1" -o -z "$1" ]
+    then
+        echo "stop_global_heartbeat_o2cb(): Requires an argument" >&2
+        return 1
+    fi
+    CLUSTER="$1"
+
+    global_heartbeat_enabled_o2cb
+    if [ $? -ne 1 ]
+    then
+        return 0;
+    fi
+
+    echo -n "Stopping global heartbeat on cluster \"${CLUSTER}\": "
+    OUTPUT=$(o2cb stop-heartbeat "${CLUSTER}" 2>&1)
+    if [ $? = 0 ]
+    then
+        echo "OK"
+        return 0
+    else
+        echo "Failed"
+        echo "$OUTPUT"
+    fi
+
+    return 1
+}
+
+online_o2cb()
+{
+    if [ "$#" -lt "1" -o -z "$1" ]
+    then
+        echo "online_o2cb(): Requires an argument" >&2
+        return 1
+    fi
+    CLUSTER="$1"
+
+    # allow re-online if global heartbeat enabled
+    check_online $CLUSTER
+    if [ $? = 2 ]
+    then
+        global_heartbeat_enabled_o2cb
+        if [ $? -ne 1 ]
+        then
+            echo "Cluster ${CLUSTER} already online"
+            return 1
+        fi
+    fi
+
+    register_cluster_o2cb "${CLUSTER}"
+    if [ $? -eq 1 ]
+    then
+        unregister_cluster_o2cb "${CLUSTER}"
+        return 1
+    fi
+
+    echo -n "Setting O2CB cluster timeouts : "
+    set_timeouts_o2cb
+    echo "OK"
+
+    start_global_heartbeat_o2cb "${CLUSTER}"
+    if [ $? -eq 1 ]
+    then
+        stop_global_heartbeat_o2cb "${CLUSTER}"
+        return 1
+    fi
+
+    o2hbmonitor 2>/dev/null
+
+    return 0
 }
 
 online_user()
@@ -1190,6 +1543,13 @@ online_user()
         return 1
     fi
     CLUSTER="$1"
+
+    check_online $CLUSTER
+    if [ $? = 2 ]
+    then
+        echo "Cluster ${CLUSTER} already online"
+        return 1
+    fi
 
     load_filesystem "ocfs2"
     if_fail $? "Unable to load ocfs2 driver"
@@ -1207,13 +1567,6 @@ online()
         return
     fi
     PLUGIN="$(select_stack_plugin)"
-
-    check_online $CLUSTER
-    if [ $? = 2 ]
-    then
-        echo "Cluster ${CLUSTER} already online"
-        return
-    fi
 
     if [ -f "$CLUSTER_STACK_FILE" ]
     then
@@ -1238,28 +1591,25 @@ check_online_o2cb()
 {
     if [ "$#" -lt "1" -o -z "$1" ]
     then
-        echo "check_online(): Requires an argument" >&2
+        echo "check_online_o2cb(): Requires an argument" >&2
         return 1
     fi
     CLUSTER="$1"
 
-    RC=0
-    if [ -d "$(configfs_path)/cluster/${CLUSTER}/node/" ]
+    check_register_o2cb "$CLUSTER"
+    if [ $? -ne 2 ]
     then
-        ls -1 "$(configfs_path)/cluster/${CLUSTER}/node/" | while read NODE
-        do
-            LOCAL="`cat \"$(configfs_path)/cluster/${CLUSTER}/node/${NODE}/local\"`"
-            if [ $LOCAL = 1 ]
-            then
-                return 2
-            fi
-        done
-        if [ $? = 2 ]
-        then
-            RC=2
-        fi
+         return $RC
     fi
-    return $RC
+
+    global_heartbeat_enabled_o2cb "$CLUSTER"
+    if [ $? -eq 0 ]
+    then
+        return 2
+    fi
+
+    check_heartbeat_o2cb "$CLUSTER"
+    return $?
 }
 
 #
@@ -1304,10 +1654,12 @@ offline_o2cb()
         return
     fi
 
-    clean_heartbeat $CLUSTER
+    stop_global_heartbeat_o2cb "$CLUSTER"
+
+    clean_heartbeat_o2cb $CLUSTER
 
     echo -n "Stopping O2CB cluster ${CLUSTER}: "
-    check_heartbeat $CLUSTER
+    check_heartbeat_o2cb $CLUSTER
     if [ $? != 0 ]
     then
         echo "Failed"
@@ -1315,14 +1667,12 @@ offline_o2cb()
         exit 1
     fi
 
-    if [ "$FORCE" -eq 1 ]
-    then
-        clean_cluster $CLUSTER
-        if_fail "$?" "Unable to force-offline cluster $CLUSTER" >&2
-    else
-        OUTPUT="`o2cb_ctl -H -n "${CLUSTER}" -t cluster -a online=no 2>&1`"
-        if_fail "$?" "$OUTPUT - Try to force-offline the O2CB cluster"
-    fi
+    killall -e o2hbmonitor 2>/dev/null
+
+    # ignoring force-offline as this should be enough
+
+    unregister_cluster_o2cb "${CLUSTER}"
+    return $?
 }
 
 offline_user()
@@ -1355,6 +1705,8 @@ offline()
         FORCE=0
     fi
 
+    clean_userdlm_domains
+
     offline_$PLUGIN "$CLUSTER" "$FORCE"
 
     unload_filesystem "ocfs2"
@@ -1378,8 +1730,10 @@ unload()
 
     unload_stack_$PLUGIN
 
+    remove_lockfile
+
     # Only unmount configfs if there are no other users
-    if [ -z "$(ls -1 "$(configfs_path)")" ]
+    if [ -z "$(ls -1 "$(configfs_path)" 2>/dev/null)" ]
     then
         unmount_filesystem "configfs" "$(configfs_path)"
         if_fail $?
@@ -1410,7 +1764,7 @@ online_status_o2cb()
     fi
     CLUSTER="$1"
 
-    echo -n "Checking O2CB cluster $CLUSTER: "
+    echo -n "Checking O2CB cluster \"$CLUSTER\": "
     check_online_o2cb $CLUSTER
     if [ $? = 2 ]
     then
@@ -1420,11 +1774,20 @@ online_status_o2cb()
        return 0;
     fi
 
-    show_timeouts
+    show_timeouts_o2cb
+
+    HBMODE="Local"
+    global_heartbeat_enabled_o2cb "$CLUSTER"
+    if [ $? -eq 1 ]
+    then
+        HBMODE="Global"
+    fi
+
+    echo "  Heartbeat mode: ${HBMODE}"
 
     echo -n "Checking O2CB heartbeat: "
-    check_heartbeat $CLUSTER
-    if [ $? = 2 ]
+    check_heartbeat_o2cb $CLUSTER
+    if [ $? -eq 2 ]
     then
         echo "Active"
     else
@@ -1432,6 +1795,11 @@ online_status_o2cb()
         return 0;
     fi
 
+    if [ $HBMODE = "Global" ]
+    then
+        list_heartbeat_o2cb $CLUSTER
+        list_nodes_o2cb
+    fi
 }
 
 online_status_user()
@@ -1463,9 +1831,39 @@ status()
     fi
 
     online_status "$CLUSTER"
+
+    userdlm_status
 }
 
+#
+# online_status()
+#
+# Return codes to userspace. ** Do not change. **
+# 0 is online, 1 is offline, 2 is error
+#
+online-status()
+{
+    CLUSTER="${1:-${O2CB_BOOTCLUSTER}}"
+    if [ -z "$CLUSTER" ]
+    then
+        return 2
+    fi
 
+    check_online "$CLUSTER"
+    RC=$?
+    if [ "$RC" = "2" ]
+    then
+        echo "online"
+        exit 0
+    elif [ "$RC" = "0" ]
+    then
+        echo "offline"
+        exit 1
+    else
+        echo "error"
+        exit 2
+    fi
+}
 
 case "$1" in
     start)
@@ -1497,6 +1895,10 @@ case "$1" in
     online)
         load
         online "$2"
+        ;;
+
+    online-status)
+        online-status "$2"
         ;;
 
     offline)
@@ -1537,7 +1939,7 @@ case "$1" in
         ;;
 
     *)
-        echo "Usage: $0 {start|stop|restart|force-reload|enable|disable|configure|load|unload|online|offline|force-offline|status}"
+        echo "Usage: $0 {start|stop|restart|force-reload|enable|disable|configure|load|unload|online|offline|force-offline|status|online-status}"
         exit 1
         ;;
 esac

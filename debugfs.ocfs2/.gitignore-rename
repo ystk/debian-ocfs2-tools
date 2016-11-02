@@ -1,0 +1,7 @@
+cscope.out
+debugfs.ocfs2
+cscope.files
+*.sw?
+*.d
+debugfs.ocfs2.8
+stamp-md5

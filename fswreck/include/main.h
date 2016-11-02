@@ -54,7 +54,7 @@
 #include "ocfs2/byteorder.h"
 #include "ocfs2/ocfs2.h"
 
-#define FSWRK_FATAL(fmt, arg...)	({ fprintf(stderr, "ERROR at %s, %d: " fmt ".  EXITING!!!\n", \
+#define FSWRK_FATAL(fmt, arg...)	({ fprintf(stderr, "ERROR (%s,%d) " fmt , \
 						   __FILE__, __LINE__, ##arg);  \
 					   raise (SIGTERM);	\
 					   exit(1); \
@@ -89,5 +89,8 @@
 #include "special.h"
 #include "dir.h"
 #include "journal.h"
+#include "quota.h"
+#include "refcount.h"
+#include "discontig_bg.h"
 
 #endif		/* __MAIN_H__ */

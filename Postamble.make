@@ -54,7 +54,7 @@ $(SUBDIRS):
 	$(MAKE) -C $@
 
 .PHONY: all-rules
-all-rules: subdirs $(UNINST_LIBRARIES) $(LIBRARIES) $(BIN_PROGRAMS) $(SBIN_PROGRAMS) $(UNINST_PROGRAMS) $(MODULES) $(MANS) $(ALL_RULES)
+all-rules: subdirs $(UNINST_LIBRARIES) $(LIBRARIES) $(BIN_PROGRAMS) $(SBIN_PROGRAMS) $(UNINST_PROGRAMS) $(MODULES) $(MANS) $(ALL_RULES) $(SBIN_EXTRA) $(BIN_EXTRA)
 
 
 INSTALL_SUBDIRS = $(addsuffix -install,$(SUBDIRS))
@@ -149,7 +149,7 @@ $(CLEAN_SUBDIRS):
 	$(MAKE) -C $(subst -clean,,$@) clean
 
 clean: clean-subdirs $(CLEAN_RULES)
-	rm -f *.o *.p .*.d core $(BIN_PROGRAMS) $(SBIN_PROGRAMS) $(LIBRARIES) $(UNINST_PROGRAMS) $(UNINST_LIBRARIES) stamp-md5
+	rm -f *.o *.p .*.d core $(BIN_PROGRAMS) $(SBIN_PROGRAMS) $(LIBRARIES) $(UNINST_PROGRAMS) $(UNINST_LIBRARIES) $(SBIN_EXTRA) $(BIN_EXTRA) stamp-md5
 
 
 DIST_SUBDIRS = $(addsuffix -dist,$(SUBDIRS))
@@ -165,7 +165,7 @@ $(DIST_SUBDIRS):
 dist-mkdir:
 	$(SHELL) $(TOPDIR)/mkinstalldirs $(DIST_DIR)
 
-DIST_ALL_FILES = Makefile $(BIN_EXTRA) $(SBIN_EXTRA) $(MANS) $(VERSION_FILES) $(DIST_FILES)
+DIST_ALL_FILES = Makefile $(MANS) $(VERSION_FILES) $(DIST_FILES)
 
 dist-copy: dist-mkdir $(DIST_ALL_FILES) $(DIST_RULES)
 	@for file in $(DIST_ALL_FILES); do \

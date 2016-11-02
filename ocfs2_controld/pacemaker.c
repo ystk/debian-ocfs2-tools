@@ -31,6 +31,8 @@
 #include <pacemaker/crm/ais.h>
 #include <pacemaker/crm/common/cluster.h>
 #include <pacemaker/crm/common/stack.h>
+#include <pacemaker/crm/common/ipc.h>
+#include <pacemaker/crm/msg_xml.h>
 
 #include "ocfs2-kernel/kernel-list.h"
 #include "o2cb/o2cb.h"
@@ -41,7 +43,6 @@
 
 int			our_nodeid = 0;
 static int		pcmk_ci;
-static int		stonithd_ci;
 static char *		clustername = "pacemaker";
 extern struct list_head mounts;
 const char *stackname = "pcmk";
@@ -155,7 +156,7 @@ int setup_stack(void)
 	crm_log_init("ocfs2_controld", LOG_INFO, FALSE, TRUE, 0, NULL);
 
 	if(init_ais_connection(NULL, NULL, NULL, &local_node_uname, &our_nodeid) == FALSE) {
-		log_error("Connection to our AIS plugin (%d) failed", CRM_SERVICE);
+		log_error("Connection to our AIS plugin (CRM) failed");
 		return -1;
 	}
 
