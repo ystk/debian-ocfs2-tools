@@ -1,0 +1,11 @@
+--- a/o2cb_ctl/o2cb_scandisk.c
++++ b/o2cb_ctl/o2cb_scandisk.c
+@@ -130,6 +130,8 @@
+ 				add = !strncmp(path->path, "/dev/loop", 9);
+ 			if (!add)
+ 				add = !strncmp(path->path, "/dev/xvd", 8);
++			if (!add)
++				add = !strncmp(path->path, "/dev/vd", 7);
+ 		}
+ 		if (add) {
+ 			hb = malloc(sizeof(struct hb_devices));

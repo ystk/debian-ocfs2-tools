@@ -1,15 +1,21 @@
 Source: ocfs2-tools
 Section: admin
 Priority: optional
-Maintainer: David Martínez Moreno <ender@debian.org>
-Standards-Version: 3.7.2.0
-Build-Depends: debhelper (>= 5), po-debconf, python-support (>= 0.4), quilt, pkg-config, comerr-dev, uuid-dev, libncurses5-dev, libreadline5-dev, libglib2.0-dev (>= 2.2.3), libblkid-dev (>= 1.36), libdevmapper-dev, libselinux1-dev, libsepol1-dev, python-dev, python-gtk2
+Maintainer: Debian HA Maintainers <debian-ha-maintainers@lists.alioth.debian.org>
+Uploaders: Valentin Vidic <Valentin.Vidic@CARNet.hr>
+Standards-Version: 3.9.8
+Build-Depends: debhelper (>= 9), po-debconf, autotools-dev, comerr-dev,
+ uuid-dev, libncurses5-dev, libreadline-dev, libglib2.0-dev (>= 2.2.3),
+ libblkid-dev (>= 1.36), libbz2-dev, libdevmapper-dev, libdlm-dev,
+ libdlmcontrol-dev, libxml2-dev, libaio-dev, dh-autoreconf
+Homepage: https://ocfs2.wiki.kernel.org/
+Vcs-Git: git://anonscm.debian.org/debian-ha/ocfs2-tools.git
+Vcs-Browser: https://anonscm.debian.org/cgit/debian-ha/ocfs2-tools.git/
 
 Package: ocfs2-tools
-Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}, psmisc
 Section: admin
-Suggests: ocfs2console
 Description: tools for managing OCFS2 cluster filesystems
  OCFS2 is a general purpose cluster filesystem. Unlike the initial release
  of OCFS, which supported only Oracle database workloads, OCFS2 provides
@@ -20,9 +26,9 @@ Description: tools for managing OCFS2 cluster filesystems
  This package installs the tools to manage the OCFS2 filesystem, including mkfs,
  tunefs, fsck, debugfs, and the utilities to control the O2CB clustering stack.
 
-Package: ocfs2-tools-static-dev
-Architecture: any
-Depends: ${shlibs:Depends}, ocfs2-tools (= ${Source-Version})
+Package: ocfs2-tools-dev
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ocfs2-tools (= ${binary:Version})
 Section: devel
 Description: tools for managing OCFS2 cluster filesystems - development files
  OCFS2 is a general purpose cluster filesystem. Unlike the initial release
@@ -32,18 +38,3 @@ Description: tools for managing OCFS2 cluster filesystems - development files
  Linux kernel.
  .
  This package installs the development headers and static libraries.
-
-Package: ocfs2console
-Architecture: any
-Depends: ${shlibs:Depends}, ${python:Depends}, ocfs2-tools (= ${binary:Version}), python-gtk2
-Section: admin
-Description: tools for managing OCFS2 cluster filesystems (graphical interface)
- OCFS2 is a general purpose cluster filesystem. Unlike the initial release
- of OCFS, which supported only Oracle database workloads, OCFS2 provides
- full support as a general purpose filesystem.  OCFS2 is a complete rewrite
- of the previous version, designed to work as a seamless addition to the
- Linux kernel.
- .
- A GUI frontend for managing OCFS2 volumes on the system. One can mount
- and unmount volumes, format, view overview information and individual
- files, and view and modify the current cluster configuration.

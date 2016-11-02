@@ -1,0 +1,13 @@
+Index: my/libo2dlm/o2dlm.c
+===================================================================
+--- my.orig/libo2dlm/o2dlm.c
++++ my/libo2dlm/o2dlm.c
+@@ -802,7 +802,7 @@ static errcode_t load_fsdlm(struct o2dlm
+ 		goto out;
+ 	}
+ 
+-	ctxt->ct_lib_handle = dlopen("libdlm_lt.so",
++	ctxt->ct_lib_handle = dlopen("libdlm_lt.so.3",
+ 				     RTLD_NOW | RTLD_LOCAL);
+ 	if (!ctxt->ct_lib_handle)
+ 		goto out;

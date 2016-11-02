@@ -1,0 +1,3 @@
+Depends: ocfs2-tools
+Tests: o2cb
+Restrictions: needs-root, isolation-machine

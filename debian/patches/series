@@ -1,0 +1,5 @@
+libo2dlm-dlopen-libdlm_lt.patch
+ocfs2-init-script.patch
+o2cb-init-script.patch
+ocfs2-udev-rule.patch
+o2cb-ctl-virtio.patch
